@@ -1,0 +1,97 @@
+<mujoco model="g1_43dof two cube transfer scene">
+  <include file="../../../data/robot_model/model_data/g1/g1_29dof_with_hand.xml"/>
+  <!-- The included robot declares meshdir relative to its original directory;
+       override it here because this task scene lives in a versioned scenes folder. -->
+  <compiler angle="radian" meshdir="../../../data/robot_model/model_data/g1/meshes"/>
+
+  <!--
+    Teleoperation task: move one large cube and one small cube from the tall
+    table on the robot's right to their matching targets on the low table.
+    Coordinates follow the G1 model convention: +x forward, +y left.
+  -->
+
+  <statistic center="0.55 0 0.55" extent="2.0"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+    <material name="tall_table_mat" rgba="0.48 0.30 0.16 1"/>
+    <material name="low_table_mat" rgba="0.60 0.43 0.23 1"/>
+    <material name="large_cube_mat" rgba="0.12 0.32 0.85 1"/>
+    <material name="small_cube_mat" rgba="0.92 0.25 0.12 1"/>
+    <material name="large_target_mat" rgba="0.12 0.32 0.85 0.40"/>
+    <material name="small_target_mat" rgba="0.92 0.25 0.12 0.40"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0.4 0 2.2" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <site name="com_marker" pos="0.1 0 0" size="0.05" rgba="1 0 0 1" type="sphere"/>
+
+    <!-- Tall source table: top surface at z=0.82 m. -->
+    <body name="tall_table" pos="0.62 -0.43 0">
+      <geom name="tall_table_top" type="box" size="0.30 0.29 0.025" pos="0 0 0.795"
+            material="tall_table_mat" friction="1.2 0.02 0.001"/>
+      <geom name="tall_table_leg_1" type="box" size="0.025 0.025 0.385"
+            pos="0.25 0.24 0.385" material="tall_table_mat"/>
+      <geom name="tall_table_leg_2" type="box" size="0.025 0.025 0.385"
+            pos="0.25 -0.24 0.385" material="tall_table_mat"/>
+      <geom name="tall_table_leg_3" type="box" size="0.025 0.025 0.385"
+            pos="-0.25 0.24 0.385" material="tall_table_mat"/>
+      <geom name="tall_table_leg_4" type="box" size="0.025 0.025 0.385"
+            pos="-0.25 -0.24 0.385" material="tall_table_mat"/>
+    </body>
+
+    <!-- Low destination table: top surface at z=0.55 m. -->
+    <body name="low_table" pos="0.62 0.43 0">
+      <geom name="low_table_top" type="box" size="0.30 0.29 0.025" pos="0 0 0.525"
+            material="low_table_mat" friction="1.2 0.02 0.001"/>
+      <geom name="low_table_leg_1" type="box" size="0.025 0.025 0.25"
+            pos="0.25 0.24 0.25" material="low_table_mat"/>
+      <geom name="low_table_leg_2" type="box" size="0.025 0.025 0.25"
+            pos="0.25 -0.24 0.25" material="low_table_mat"/>
+      <geom name="low_table_leg_3" type="box" size="0.025 0.025 0.25"
+            pos="-0.25 0.24 0.25" material="low_table_mat"/>
+      <geom name="low_table_leg_4" type="box" size="0.025 0.025 0.25"
+            pos="-0.25 -0.24 0.25" material="low_table_mat"/>
+      <!-- Visual-only goal footprints; contype/conaffinity=0 prevents collision. -->
+      <geom name="large_cube_target" type="box" size="0.11 0.11 0.002"
+            pos="0 -0.12 0.552" material="large_target_mat"
+            contype="0" conaffinity="0"/>
+      <geom name="small_cube_target" type="box" size="0.06 0.06 0.002"
+            pos="0.12 0.14 0.552" material="small_target_mat"
+            contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- 18 cm, 0.7 kg cube: intended for a two-handed lift. -->
+    <body name="large_cube" pos="0.55 -0.43 0.91">
+      <freejoint name="large_cube_free"/>
+      <geom name="large_cube_geom" type="box" size="0.09 0.09 0.09"
+            mass="0.7" material="large_cube_mat" friction="1.5 0.05 0.002"
+            solref="0.004 1" solimp="0.95 0.99 0.001"/>
+    </body>
+
+    <!-- 8 cm, 0.15 kg cube: intended for a one-handed grasp. -->
+    <body name="small_cube" pos="0.72 -0.22 0.86">
+      <freejoint name="small_cube_free"/>
+      <geom name="small_cube_geom" type="box" size="0.04 0.04 0.04"
+            mass="0.15" material="small_cube_mat" friction="1.5 0.05 0.002"
+            solref="0.004 1" solimp="0.95 0.99 0.001"/>
+    </body>
+  </worldbody>
+
+  <default>
+    <geom friction="1.0"/>
+  </default>
+</mujoco>

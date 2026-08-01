@@ -123,6 +123,9 @@ class BaseConfig(ArgsConfigTemplate):
     wbc_policy_class: str = "G1DecoupledWholeBodyPolicy"
     """Whole body policy class."""
 
+    robot_scene: Optional[str] = None
+    """Optional repo-relative MJCF scene path overriding ROBOT_SCENE in the WBC YAML."""
+
     # System Configuration
     interface: str = "sim"
     """Interface to use for the control loop. [sim, real, lo, enxe8ea6a9c4e09]"""
@@ -325,6 +328,9 @@ class BaseConfig(ArgsConfigTemplate):
             wbc_config = yaml.load(file, Loader=yaml.FullLoader)
 
         wbc_config = override_wbc_config(wbc_config, self)
+
+        if self.robot_scene:
+            wbc_config["ROBOT_SCENE"] = self.robot_scene
 
         return wbc_config
 
