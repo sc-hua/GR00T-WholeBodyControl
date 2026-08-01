@@ -1,9 +1,9 @@
 """XRoboToolkit Remote Vision bridge for SONIC camera streams.
 
 The PICO client connects to the control server on TCP port 13579 and sends an
-``OPEN_CAMERA`` request.  This bridge then subscribes to the SONIC ZMQ camera
-stream, encodes ``ego_view`` as low-latency H.264, and connects back to the
-PICO decoder on TCP port 12345.
+``OPEN_CAMERA`` request.  This bridge then subscribes to a selected image in
+the SONIC ZMQ camera stream, encodes it as low-latency H.264, and connects
+back to the PICO decoder on TCP port 12345.
 
 The framing implemented here mirrors XR-Robotics/XRoboToolkit-Orin-Video-Sender:
 
@@ -127,26 +127,145 @@ def frame_video_packet(payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + payload
 
 
-def make_stereo_frame(image: Any, width: int, height: int) -> Any:
-    """Letterbox one BGR image into each half of a side-by-side frame."""
+def _letterbox(image: Any, width: int, height: int) -> Any:
+    """Resize one BGR image into a black canvas while preserving aspect ratio."""
 
     import cv2
     import numpy as np
 
     if image is None or image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("camera image must have shape HxWx3")
+    if width <= 0 or height <= 0:
+        raise ValueError("output dimensions must be positive")
+
+    scale = min(width / image.shape[1], height / image.shape[0])
+    scaled_width = max(2, int(image.shape[1] * scale) // 2 * 2)
+    scaled_height = max(2, int(image.shape[0] * scale) // 2 * 2)
+    scaled_width = min(width, scaled_width)
+    scaled_height = min(height, scaled_height)
+    resized = cv2.resize(image, (scaled_width, scaled_height), interpolation=cv2.INTER_LINEAR)
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    x = (width - scaled_width) // 2
+    y = (height - scaled_height) // 2
+    canvas[y : y + scaled_height, x : x + scaled_width] = resized
+    return canvas
+
+
+def make_stereo_frame(image: Any, width: int, height: int) -> Any:
+    """Letterbox one BGR image into each half of a side-by-side frame."""
+
+    import numpy as np
+
     if width <= 0 or height <= 0 or width % 2:
         raise ValueError("stereo output width must be positive and even")
 
+    eye = _letterbox(image, width // 2, height)
+    return np.concatenate((eye, eye), axis=1)
+
+
+def _labeled_tile(image: Any | None, width: int, height: int, label: str) -> Any:
+    """Render a camera tile, or a visible placeholder when that camera is absent."""
+
+    import cv2
+    import numpy as np
+
+    if image is None:
+        tile = np.full((height, width, 3), 72, dtype=np.uint8)
+        status = "NO SIGNAL"
+    else:
+        tile = _letterbox(image, width, height)
+        status = ""
+
+    font_scale = max(0.35, min(width, height) / 500.0)
+    thickness = max(1, round(font_scale * 2))
+    text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+    bar_height = min(height, max(24, text_size[1] + 14))
+    text_y = min(bar_height - 5, (bar_height + text_size[1]) // 2)
+    overlay = tile.copy()
+    cv2.rectangle(overlay, (0, 0), (width, bar_height), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.65, tile, 0.35, 0, tile)
+    cv2.putText(
+        tile,
+        label,
+        (8, text_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+    if status:
+        text_size = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+        cv2.putText(
+            tile,
+            status,
+            (max(4, (width - text_size[0]) // 2), max(bar_height + 18, height // 2)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (210, 210, 210),
+            thickness,
+            cv2.LINE_AA,
+        )
+    cv2.rectangle(tile, (0, 0), (width - 1, height - 1), (150, 150, 150), 1)
+    return tile
+
+
+def make_multiview_stereo_frame(
+    images: dict[str, Any],
+    width: int,
+    height: int,
+    layout: str,
+    main_key: str = "third_person_view",
+) -> Any | None:
+    """Compose one multi-camera eye view and duplicate it for the PICO SBS decoder.
+
+    ``dual_view`` overlays the ego camera on the main view. ``dashboard`` reserves
+    a right column for ego and both wrist cameras. Missing secondary cameras use
+    labeled placeholders, while a missing main camera waits for the next message.
+    """
+
+    import numpy as np
+
+    if width <= 0 or height <= 0 or width % 2:
+        raise ValueError("stereo output width must be positive and even")
+    if layout not in {"single", "dual_view", "dashboard"}:
+        raise ValueError(f"unsupported XR camera layout: {layout}")
+
+    main_image = images.get(main_key)
+    if main_image is None:
+        return None
+    if layout == "single":
+        return make_stereo_frame(main_image, width, height)
+
     eye_width = width // 2
-    scale = min(eye_width / image.shape[1], height / image.shape[0])
-    scaled_width = max(2, int(image.shape[1] * scale) // 2 * 2)
-    scaled_height = max(2, int(image.shape[0] * scale) // 2 * 2)
-    resized = cv2.resize(image, (scaled_width, scaled_height), interpolation=cv2.INTER_LINEAR)
-    eye = np.zeros((height, eye_width, 3), dtype=np.uint8)
-    x = (eye_width - scaled_width) // 2
-    y = (height - scaled_height) // 2
-    eye[y : y + scaled_height, x : x + scaled_width] = resized
+    if layout == "dual_view":
+        eye = _letterbox(main_image, eye_width, height)
+        inset_width = max(2, eye_width // 3)
+        inset_height = max(2, height // 3)
+        inset = _labeled_tile(images.get("ego_view"), inset_width, inset_height, "EGO")
+        margin = max(4, min(16, eye_width // 40))
+        x = eye_width - inset_width - margin
+        y = margin
+        eye[y : y + inset_height, x : x + inset_width] = inset
+    else:
+        sidebar_width = max(2, eye_width // 4)
+        main_width = eye_width - sidebar_width
+        eye = np.zeros((height, eye_width, 3), dtype=np.uint8)
+        eye[:, :main_width] = _labeled_tile(
+            main_image, main_width, height, main_key.upper().replace("_", " ")
+        )
+        keys_and_labels = (
+            ("ego_view", "EGO"),
+            ("left_wrist", "LEFT WRIST"),
+            ("right_wrist", "RIGHT WRIST"),
+        )
+        for index, (key, label) in enumerate(keys_and_labels):
+            y0 = height * index // 3
+            y1 = height * (index + 1) // 3
+            eye[y0:y1, main_width:] = _labeled_tile(
+                images.get(key), sidebar_width, y1 - y0, label
+            )
+
     return np.concatenate((eye, eye), axis=1)
 
 
@@ -166,17 +285,31 @@ class SonicZmqFrameSource:
         LOGGER.info("Subscribed to SONIC camera at tcp://%s:%d (%s)", host, port, image_key)
 
     def receive(self, timeout_ms: int = 500) -> Any | None:
+        return self.receive_images(timeout_ms, {self._image_key}).get(self._image_key)
+
+    def receive_images(
+        self, timeout_ms: int = 500, image_keys: set[str] | None = None
+    ) -> dict[str, Any]:
+        """Read and decode selected images from the newest publisher message."""
+
         import msgpack
         import msgpack_numpy
 
         if not self._socket.poll(timeout_ms):
-            return None
+            return {}
         message = msgpack.unpackb(
             self._socket.recv(), object_hook=msgpack_numpy.decode, raw=False
         )
         images = message.get("images", {})
-        encoded = images.get(self._image_key, message.get(self._image_key))
-        return self._decode_image(encoded)
+        if not isinstance(images, dict):
+            images = {}
+        keys = image_keys if image_keys is not None else set(images)
+        decoded: dict[str, Any] = {}
+        for key in keys:
+            image = self._decode_image(images.get(key, message.get(key)))
+            if image is not None:
+                decoded[key] = image
+        return decoded
 
     @staticmethod
     def _decode_image(encoded: Any) -> Any | None:
@@ -268,13 +401,17 @@ class XRoboToolkitVideoServer:
         camera_host: str = "localhost",
         camera_port: int = 5555,
         image_key: str = "ego_view",
+        layout: str = "single",
         encoder: str = "auto",
     ):
+        if layout not in {"single", "dual_view", "dashboard"}:
+            raise ValueError(f"unsupported XR camera layout: {layout}")
         self.control_host = control_host
         self.control_port = control_port
         self.camera_host = camera_host
         self.camera_port = camera_port
         self.image_key = image_key
+        self.layout = layout
         self.encoder = encoder
         self._shutdown = threading.Event()
         self._stream_stop: threading.Event | None = None
@@ -383,13 +520,36 @@ class XRoboToolkitVideoServer:
                 request.bitrate,
                 self.encoder,
             )
-            LOGGER.info("Video connected; waiting for %s frames", self.image_key)
+            LOGGER.info(
+                "Video connected; waiting for layout=%s main=%s frames",
+                self.layout,
+                self.image_key,
+            )
             frame_count = 0
             while not stream_stop.is_set() and not self._shutdown.is_set():
-                image = source.receive()
-                if image is None:
-                    continue
-                stereo = make_stereo_frame(image, request.width, request.height)
+                if self.layout == "single":
+                    image = source.receive()
+                    if image is None:
+                        continue
+                    stereo = make_stereo_frame(image, request.width, request.height)
+                else:
+                    images = source.receive_images(
+                        image_keys={
+                            self.image_key,
+                            "ego_view",
+                            "left_wrist",
+                            "right_wrist",
+                        }
+                    )
+                    stereo = make_multiview_stereo_frame(
+                        images,
+                        request.width,
+                        request.height,
+                        self.layout,
+                        self.image_key,
+                    )
+                    if stereo is None:
+                        continue
                 for payload in encoder.encode(stereo):
                     video_socket.sendall(frame_video_packet(payload))
                 frame_count += 1

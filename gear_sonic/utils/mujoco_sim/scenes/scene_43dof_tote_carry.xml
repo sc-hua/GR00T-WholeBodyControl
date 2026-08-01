@@ -1,0 +1,164 @@
+<mujoco model="g1_43dof low-to-high table tote carry scene">
+  <include file="../../../data/robot_model/model_data/g1/g1_29dof_with_hand.xml"/>
+  <!-- The robot include declares meshdir relative to its own directory. -->
+  <compiler angle="radian" meshdir="../../../data/robot_model/model_data/g1/meshes"/>
+
+  <!--
+    Whole-body teleoperation task: approach the low source table, grasp both
+    side handles, lift the tote, carry it to the taller destination table,
+    and place it inside the green target.
+
+    G1 coordinates: +x forward, +y left.  The XML defaults place the low
+    source table and tote to the robot's right and the 0.72 m-high destination
+    table to its left.  Backspace randomizes both tables and places the tote
+    back on the low source table.
+  -->
+
+  <statistic center="0.55 0.10 0.55" extent="2.0"/>
+
+  <!--
+    Backspace reset randomization around the robot for both tables:
+    center_x center_y radius_min radius_max z yaw_min yaw_max.
+    The tote is then placed on source_table with small local x/y/yaw jitter.
+  -->
+  <custom>
+    <numeric name="random_spawn_annulus_body_workbench"
+             data="0 0 0.95 1.20 0 -3.141593 3.141593"/>
+    <numeric name="random_spawn_annulus_body_source_table"
+             data="0 0 0.70 0.90 0 -3.141593 3.141593"/>
+    <numeric name="random_spawn_on_body_tote_free__source_table"
+             data="-0.025 0.025 -0.025 0.025 0.508 -0.174533 0.174533"/>
+    <numeric name="spawn_avoid_body_source_table_workbench" data="1.00"/>
+    <numeric name="spawn_avoid_body_tote_free_workbench" data="0.80"/>
+  </custom>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+    <material name="table_mat" rgba="0.53 0.34 0.18 1"/>
+    <material name="source_table_mat" rgba="0.72 0.52 0.27 1"/>
+    <material name="tote_mat" rgba="0.12 0.38 0.82 1"/>
+    <material name="handle_mat" rgba="0.08 0.12 0.18 1"/>
+    <material name="target_mat" rgba="0.15 0.85 0.30 0.32"/>
+    <!-- The source STL is in millimetres (600 x 400 x 220). -->
+    <mesh name="tote_visual"
+          file="../../../../robots/g1/meshes/tote_no_bar.STL"
+          scale="0.00062 0.00062 0.00090"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0.5 0 2.2" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <site name="com_marker" pos="0.1 0 0" size="0.05" rgba="1 0 0 1" type="sphere"/>
+    <!-- Fixed-position chase camera: orientation continuously targets G1 pelvis. -->
+    <camera name="third_person_camera" mode="targetbody" target="pelvis"
+            pos="1.8 -1.8 1.6" fovy="60"/>
+
+    <!-- Destination table on the robot's left; top surface at z = 0.72 m. -->
+    <body name="workbench" mocap="true" pos="0.65 0.42 0">
+      <geom name="table_top" type="box" size="0.32 0.32 0.025" pos="0 0 0.695"
+            material="table_mat" friction="1.1 0.02 0.001"/>
+      <geom name="table_leg_front_left" type="box" size="0.025 0.025 0.335"
+            pos="0.26 0.26 0.335" material="table_mat"/>
+      <geom name="table_leg_front_right" type="box" size="0.025 0.025 0.335"
+            pos="0.26 -0.26 0.335" material="table_mat"/>
+      <geom name="table_leg_back_left" type="box" size="0.025 0.025 0.335"
+            pos="-0.26 0.26 0.335" material="table_mat"/>
+      <geom name="table_leg_back_right" type="box" size="0.025 0.025 0.335"
+            pos="-0.26 -0.26 0.335" material="table_mat"/>
+
+      <!-- Visual-only goal footprint on the table. -->
+      <geom name="tote_target" type="box" size="0.215 0.150 0.002"
+            pos="0 0 0.722" material="target_mat"
+            contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Low source table; top surface at z = 0.50 m. -->
+    <body name="source_table" mocap="true" pos="0.55 -0.40 0">
+      <geom name="source_table_top" type="box" size="0.34 0.32 0.025"
+            pos="0 0 0.475" material="source_table_mat" friction="1.1 0.02 0.001"/>
+      <geom name="source_leg_front_left" type="box" size="0.025 0.025 0.225"
+            pos="0.28 0.26 0.225" material="source_table_mat"/>
+      <geom name="source_leg_front_right" type="box" size="0.025 0.025 0.225"
+            pos="0.28 -0.26 0.225" material="source_table_mat"/>
+      <geom name="source_leg_back_left" type="box" size="0.025 0.025 0.225"
+            pos="-0.28 0.26 0.225" material="source_table_mat"/>
+      <geom name="source_leg_back_right" type="box" size="0.025 0.025 0.225"
+            pos="-0.28 -0.26 0.225" material="source_table_mat"/>
+    </body>
+
+    <!--
+      Lightweight tote, approximately 37 x 25 x 20 cm.  The STL is visual
+      only; primitive collision geoms give stable contact and an open top.
+      Its local origin is at the bottom, so z=0.508 rests it on the 0.50 m
+      source table. Backspace spawn settings are declared in <custom>.
+    -->
+    <body name="tote" pos="0.55 -0.40 0.508">
+      <freejoint name="tote_free"/>
+      <inertial pos="0 0 0.085" mass="0.40"
+                diaginertia="0.0090 0.0140 0.0160"/>
+
+      <geom name="tote_visual_geom" type="mesh" mesh="tote_visual"
+            material="tote_mat" contype="0" conaffinity="0" density="0" group="2"/>
+
+      <!-- Bottom and four thin walls. -->
+      <geom name="tote_bottom" type="box" size="0.186 0.124 0.008" pos="0 0 0"
+            rgba="0.12 0.38 0.82 0" density="0"
+            friction="1.2 0.03 0.002" solref="0.006 1" solimp="0.95 0.99 0.001"/>
+      <geom name="tote_front_wall" type="box" size="0.008 0.124 0.095"
+            pos="0.178 0 0.095" rgba="0.12 0.38 0.82 0" density="0"
+            friction="1.2 0.03 0.002"/>
+      <geom name="tote_back_wall" type="box" size="0.008 0.124 0.095"
+            pos="-0.178 0 0.095" rgba="0.12 0.38 0.82 0" density="0"
+            friction="1.2 0.03 0.002"/>
+      <geom name="tote_left_wall" type="box" size="0.178 0.008 0.095"
+            pos="0 0.116 0.095" rgba="0.12 0.38 0.82 0" density="0"
+            friction="1.2 0.03 0.002"/>
+      <geom name="tote_right_wall" type="box" size="0.178 0.008 0.095"
+            pos="0 -0.116 0.095" rgba="0.12 0.38 0.82 0" density="0"
+            friction="1.2 0.03 0.002"/>
+
+      <!--
+        Rigid vertical D-shaped handles.  Each 13 cm vertical grip sits about
+        5 cm clear of its side wall, with short upper/lower mounts, so Dex3
+        fingers can pass through and wrap around it.
+      -->
+      <geom name="left_handle_bar" type="capsule" size="0.012"
+            fromto="0 0.185 0.045 0 0.185 0.175"
+            material="handle_mat" density="0" friction="2.0 0.06 0.003"
+            solref="0.004 1" solimp="0.97 0.995 0.001"/>
+      <geom name="left_handle_upper_mount" type="capsule" size="0.010"
+            fromto="0 0.116 0.175 0 0.185 0.175"
+            material="handle_mat" density="0"/>
+      <geom name="left_handle_lower_mount" type="capsule" size="0.010"
+            fromto="0 0.116 0.045 0 0.185 0.045"
+            material="handle_mat" density="0"/>
+
+      <geom name="right_handle_bar" type="capsule" size="0.012"
+            fromto="0 -0.185 0.045 0 -0.185 0.175"
+            material="handle_mat" density="0" friction="2.0 0.06 0.003"
+            solref="0.004 1" solimp="0.97 0.995 0.001"/>
+      <geom name="right_handle_upper_mount" type="capsule" size="0.010"
+            fromto="0 -0.116 0.175 0 -0.185 0.175"
+            material="handle_mat" density="0"/>
+      <geom name="right_handle_lower_mount" type="capsule" size="0.010"
+            fromto="0 -0.116 0.045 0 -0.185 0.045"
+            material="handle_mat" density="0"/>
+    </body>
+  </worldbody>
+
+  <default>
+    <geom friction="1.0"/>
+  </default>
+</mujoco>

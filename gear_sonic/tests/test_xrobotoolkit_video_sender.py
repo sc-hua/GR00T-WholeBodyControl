@@ -5,6 +5,7 @@ import numpy as np
 from gear_sonic.utils.teleop.xrobotoolkit_video_sender import (
     LengthPrefixedStream,
     frame_video_packet,
+    make_multiview_stereo_frame,
     make_stereo_frame,
     parse_camera_request,
     parse_control_message,
@@ -71,3 +72,50 @@ def test_stereo_frame_duplicates_letterboxed_source():
     assert np.all(stereo[:, :2] == 0)
     assert np.all(stereo[:, 2:6] == 127)
     assert np.all(stereo[:, 6:8] == 0)
+
+
+def test_dashboard_duplicates_main_ego_and_wrist_tiles_for_both_eyes():
+    images = {
+        "third_person_view": np.full((72, 96, 3), (10, 20, 200), dtype=np.uint8),
+        "ego_view": np.full((24, 32, 3), (20, 200, 10), dtype=np.uint8),
+        "left_wrist": np.full((24, 32, 3), (200, 10, 20), dtype=np.uint8),
+    }
+
+    stereo = make_multiview_stereo_frame(
+        images, width=512, height=144, layout="dashboard"
+    )
+
+    assert stereo.shape == (144, 512, 3)
+    np.testing.assert_array_equal(stereo[:, :256], stereo[:, 256:])
+    # Main camera occupies the large left region; right wrist is a gray placeholder.
+    assert np.array_equal(stereo[100, 100], np.array((10, 20, 200)))
+    placeholder_pixel = stereo[125, 220]
+    assert placeholder_pixel[0] == placeholder_pixel[1] == placeholder_pixel[2]
+    assert placeholder_pixel[0] > 0
+
+
+def test_dual_view_places_ego_inset_over_main_view():
+    images = {
+        "third_person_view": np.full((72, 128, 3), 25, dtype=np.uint8),
+        "ego_view": np.full((48, 64, 3), 180, dtype=np.uint8),
+    }
+
+    stereo = make_multiview_stereo_frame(
+        images, width=512, height=144, layout="dual_view"
+    )
+
+    np.testing.assert_array_equal(stereo[:, :256], stereo[:, 256:])
+    assert np.all(stereo[120, 100] == 25)
+    assert np.all(stereo[45, 220] == 180)
+
+
+def test_multiview_waits_until_main_camera_is_available():
+    assert (
+        make_multiview_stereo_frame(
+            {"ego_view": np.zeros((4, 4, 3), dtype=np.uint8)},
+            width=16,
+            height=4,
+            layout="dashboard",
+        )
+        is None
+    )

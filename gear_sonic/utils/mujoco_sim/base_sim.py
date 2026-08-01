@@ -60,9 +60,28 @@ class DefaultEnv:
         self.reward_lock = Lock()
         self.unitree_bridge = None
         self.onscreen = onscreen
+        self._reset_rng = np.random.default_rng(self.config.get("RESET_RANDOM_SEED"))
+        self._viewer_reset_requested_at = None
 
         self.init_scene()
         self.last_reward = 0
+
+        if (
+            not camera_configs
+            and offscreen
+            and enable_image_publish
+            and mujoco.mj_name2id(
+                self.mj_model,
+                mujoco.mjtObj.mjOBJ_CAMERA,
+                "third_person_camera",
+            )
+            != -1
+        ):
+            self.camera_configs["third_person_view"] = {
+                "height": 480,
+                "width": 640,
+                "mjcf_name": "third_person_camera",
+            }
 
         self.offscreen = offscreen
         if self.offscreen:
@@ -182,6 +201,7 @@ class DefaultEnv:
                 )
 
         # Enable the elastic band
+        self.elastic_band = None
         if self.config["ENABLE_ELASTIC_BAND"] and self.use_floating_root_link:
             self.elastic_band = ElasticBand()
             if "g1" in self.config["ROBOT_TYPE"]:
@@ -198,7 +218,7 @@ class DefaultEnv:
                 self.viewer = mujoco.viewer.launch_passive(
                     self.mj_model,
                     self.mj_data,
-                    key_callback=self.elastic_band.MujuocoKeyCallback,
+                    key_callback=self._mujoco_key_callback,
                     show_left_ui=False,
                     show_right_ui=False,
                 )
@@ -208,7 +228,11 @@ class DefaultEnv:
         else:
             if self.onscreen:
                 self.viewer = mujoco.viewer.launch_passive(
-                    self.mj_model, self.mj_data, show_left_ui=False, show_right_ui=False
+                    self.mj_model,
+                    self.mj_data,
+                    key_callback=self._mujoco_key_callback,
+                    show_left_ui=False,
+                    show_right_ui=False,
                 )
             else:
                 mujoco.mj_forward(self.mj_model, self.mj_data)
@@ -387,6 +411,7 @@ class DefaultEnv:
         return obs
 
     def sim_step(self):
+        self._apply_pending_viewer_reset()
         self.obs = self.prepare_obs()
         self.unitree_bridge.PublishLowState(self.obs)
         if self.unitree_bridge.joystick:
@@ -499,11 +524,27 @@ class DefaultEnv:
             self.elastic_band.handle_keyboard_button(key)
 
         if key == "backspace":
-            self.reset()
+            self.reset(randomize_spawns=True)
         if key == "v":
             self.update_viewer_camera()
         if key in ["up", "down", "left", "right"]:
             self.apply_perturbation(key)
+
+    def _mujoco_key_callback(self, key):
+        """Forward raw viewer keys and defer data changes to the simulation thread."""
+        import glfw
+
+        if self.elastic_band:
+            self.elastic_band.MujuocoKeyCallback(key)
+        if key == glfw.KEY_BACKSPACE:
+            self._viewer_reset_requested_at = time.monotonic()
+
+    def _apply_pending_viewer_reset(self):
+        requested_at = self._viewer_reset_requested_at
+        if requested_at is None or time.monotonic() - requested_at < 0.02:
+            return
+        self._viewer_reset_requested_at = None
+        self.reset(randomize_spawns=True)
 
     def check_fall(self):
         self.fall = False
@@ -523,8 +564,420 @@ class DefaultEnv:
             print(f"Warning: Self-collision detected: {contact_bodies}")
         return self_collision
 
-    def reset(self):
+    def _randomize_reset_spawns(self):
+        """Randomize free joints declared by scene custom numerics.
+
+        ``random_spawn_<freejoint>`` samples an axis-aligned rectangle using
+        ``x_min x_max y_min y_max z yaw_min yaw_max``.
+
+        ``random_spawn_annulus_<freejoint>`` samples around a point using
+        ``center_x center_y radius_min radius_max z yaw_min yaw_max``.  An
+        optional ``spawn_avoid_aabb_<freejoint>`` numeric supplies
+        ``x_min x_max y_min y_max clearance`` for a forbidden table/obstacle
+        region.  ``random_spawn_annulus_body_<mocap body>`` uses the same
+        annulus format for a kinematic body.  ``random_spawn_on_body_<freejoint>
+        __<body>`` places an object relative to a randomized support body using
+        ``dx_min dx_max dy_min dy_max z_offset yaw_min yaw_max``.  Angles are
+        in radians. ``spawn_distance_body_<object>_<reference body>`` can
+        additionally constrain an object's sampled x/y distance with
+        ``min_distance max_distance``. ``random_presence_<freejoint>`` uses
+        ``active_probability hidden_x hidden_y hidden_z`` to make an object
+        optional on randomized resets.
+        """
+        rectangle_prefix = "random_spawn_"
+        annulus_prefix = "random_spawn_annulus_"
+        body_annulus_prefix = "random_spawn_annulus_body_"
+        on_body_prefix = "random_spawn_on_body_"
+        presence_prefix = "random_presence_"
+        randomized = []
+
+        self._randomize_mocap_reset_bodies(body_annulus_prefix, randomized)
+        self._randomize_on_body_reset_joints(on_body_prefix, randomized)
+        presence_states = self._randomize_reset_presence(presence_prefix)
+
+        for numeric_id in range(self.mj_model.nnumeric):
+            numeric_name = mujoco.mj_id2name(
+                self.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, numeric_id
+            )
+            if not numeric_name:
+                continue
+
+            if numeric_name.startswith(body_annulus_prefix):
+                continue
+            if numeric_name.startswith(on_body_prefix):
+                continue
+            if numeric_name.startswith(annulus_prefix):
+                spawn_mode = "annulus"
+                joint_name = numeric_name[len(annulus_prefix) :]
+            elif numeric_name.startswith(rectangle_prefix):
+                spawn_mode = "rectangle"
+                joint_name = numeric_name[len(rectangle_prefix) :]
+            else:
+                continue
+
+            joint_id = mujoco.mj_name2id(
+                self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, joint_name
+            )
+            if joint_id == -1:
+                print(
+                    f"Warning: Reset randomization '{numeric_name}' refers to "
+                    f"unknown joint '{joint_name}'"
+                )
+                continue
+            if self.mj_model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_FREE:
+                print(f"Warning: Reset randomization joint '{joint_name}' is not a free joint")
+                continue
+
+            numeric_size = self.mj_model.numeric_size[numeric_id]
+            numeric_adr = self.mj_model.numeric_adr[numeric_id]
+            spawn_range = self.mj_model.numeric_data[numeric_adr : numeric_adr + numeric_size]
+            if numeric_size != 7:
+                print(
+                    f"Warning: Reset randomization '{numeric_name}' needs 7 values, "
+                    f"got {numeric_size}"
+                )
+                continue
+
+            qpos_adr = self.mj_model.jnt_qposadr[joint_id]
+            qvel_adr = self.mj_model.jnt_dofadr[joint_id]
+            default_qpos = self.mj_data.qpos[qpos_adr : qpos_adr + 7].copy()
+            default_qvel = self.mj_data.qvel[qvel_adr : qvel_adr + 6].copy()
+
+            avoid_aabb = self._get_custom_numeric(f"spawn_avoid_aabb_{joint_name}")
+            if avoid_aabb is not None and len(avoid_aabb) != 5:
+                print(
+                    f"Warning: 'spawn_avoid_aabb_{joint_name}' needs 5 values, "
+                    f"got {len(avoid_aabb)}"
+                )
+                avoid_aabb = None
+
+            sampled_pose = None
+            for _ in range(100):
+                if spawn_mode == "annulus":
+                    center_x, center_y, radius_min, radius_max, z, yaw_min, yaw_max = (
+                        spawn_range
+                    )
+                    if radius_min < 0 or radius_min > radius_max:
+                        break
+                    radius = np.sqrt(
+                        self._reset_rng.uniform(radius_min**2, radius_max**2)
+                    )
+                    angle = self._reset_rng.uniform(-np.pi, np.pi)
+                    x = center_x + radius * np.cos(angle)
+                    y = center_y + radius * np.sin(angle)
+                else:
+                    x_min, x_max, y_min, y_max, z, yaw_min, yaw_max = spawn_range
+                    if x_min > x_max or y_min > y_max:
+                        break
+                    x = self._reset_rng.uniform(x_min, x_max)
+                    y = self._reset_rng.uniform(y_min, y_max)
+
+                if yaw_min > yaw_max:
+                    break
+                yaw = self._reset_rng.uniform(yaw_min, yaw_max)
+                if avoid_aabb is not None and self._point_is_near_aabb(x, y, avoid_aabb):
+                    continue
+                if self._point_is_near_avoided_body(joint_name, x, y):
+                    continue
+                if self._point_violates_body_distance(joint_name, x, y):
+                    continue
+
+                self.mj_data.qpos[qpos_adr : qpos_adr + 3] = [x, y, z]
+                self.mj_data.qpos[qpos_adr + 3 : qpos_adr + 7] = [
+                    np.cos(yaw / 2),
+                    0.0,
+                    0.0,
+                    np.sin(yaw / 2),
+                ]
+                self.mj_data.qvel[qvel_adr : qvel_adr + 6] = 0.0
+                mujoco.mj_forward(self.mj_model, self.mj_data)
+                if not self._free_joint_has_external_contact(joint_id):
+                    sampled_pose = (joint_name, x, y, yaw)
+                    break
+
+            if sampled_pose is None:
+                self.mj_data.qpos[qpos_adr : qpos_adr + 7] = default_qpos
+                self.mj_data.qvel[qvel_adr : qvel_adr + 6] = default_qvel
+                print(f"Warning: Could not find a collision-free reset pose for '{joint_name}'")
+            else:
+                randomized.append(sampled_pose)
+
+        if randomized or presence_states:
+            mujoco.mj_forward(self.mj_model, self.mj_data)
+        if randomized:
+            for joint_name, x, y, yaw in randomized:
+                print(
+                    f"Randomized '{joint_name}' reset pose: "
+                    f"x={x:.3f}, y={y:.3f}, yaw={np.degrees(yaw):.1f} deg"
+                )
+        for joint_name, active in presence_states:
+            print(f"Randomized '{joint_name}' presence: {'active' if active else 'hidden'}")
+
+    def _randomize_reset_presence(self, prefix):
+        presence_states = []
+        for numeric_id in range(self.mj_model.nnumeric):
+            numeric_name = mujoco.mj_id2name(
+                self.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, numeric_id
+            )
+            if not numeric_name or not numeric_name.startswith(prefix):
+                continue
+
+            joint_name = numeric_name[len(prefix) :]
+            joint_id = mujoco.mj_name2id(
+                self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, joint_name
+            )
+            settings = self._get_custom_numeric(numeric_name)
+            if (
+                joint_id == -1
+                or self.mj_model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_FREE
+                or settings is None
+                or len(settings) != 4
+            ):
+                print(f"Warning: Invalid randomized-presence config '{numeric_name}'")
+                continue
+
+            active_probability, hidden_x, hidden_y, hidden_z = settings
+            if not 0.0 <= active_probability <= 1.0:
+                print(f"Warning: Presence probability must be in [0, 1] for '{joint_name}'")
+                continue
+
+            active = self._reset_rng.random() < active_probability
+            if not active:
+                qpos_adr = self.mj_model.jnt_qposadr[joint_id]
+                qvel_adr = self.mj_model.jnt_dofadr[joint_id]
+                self.mj_data.qpos[qpos_adr : qpos_adr + 3] = [
+                    hidden_x,
+                    hidden_y,
+                    hidden_z,
+                ]
+                self.mj_data.qpos[qpos_adr + 3 : qpos_adr + 7] = [1.0, 0.0, 0.0, 0.0]
+                self.mj_data.qvel[qvel_adr : qvel_adr + 6] = 0.0
+            presence_states.append((joint_name, active))
+        return presence_states
+
+    def _randomize_mocap_reset_bodies(self, prefix, randomized):
+        for numeric_id in range(self.mj_model.nnumeric):
+            numeric_name = mujoco.mj_id2name(
+                self.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, numeric_id
+            )
+            if not numeric_name or not numeric_name.startswith(prefix):
+                continue
+
+            body_name = numeric_name[len(prefix) :]
+            body_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if body_id == -1:
+                print(f"Warning: Reset randomization refers to unknown body '{body_name}'")
+                continue
+            mocap_id = self.mj_model.body_mocapid[body_id]
+            if mocap_id == -1:
+                print(f"Warning: Reset randomization body '{body_name}' is not a mocap body")
+                continue
+
+            spawn_range = self._get_custom_numeric(numeric_name)
+            if spawn_range is None or len(spawn_range) != 7:
+                print(f"Warning: Reset randomization '{numeric_name}' needs 7 values")
+                continue
+            center_x, center_y, radius_min, radius_max, z, yaw_min, yaw_max = spawn_range
+            if radius_min < 0 or radius_min > radius_max or yaw_min > yaw_max:
+                print(f"Warning: Reset randomization '{numeric_name}' has invalid bounds")
+                continue
+
+            default_pos = self.mj_data.mocap_pos[mocap_id].copy()
+            default_quat = self.mj_data.mocap_quat[mocap_id].copy()
+            sampled_pose = None
+            for _ in range(100):
+                radius = np.sqrt(self._reset_rng.uniform(radius_min**2, radius_max**2))
+                angle = self._reset_rng.uniform(-np.pi, np.pi)
+                yaw = self._reset_rng.uniform(yaw_min, yaw_max)
+                x = center_x + radius * np.cos(angle)
+                y = center_y + radius * np.sin(angle)
+                if self._point_is_near_avoided_body(body_name, x, y):
+                    continue
+                if self._point_violates_body_distance(body_name, x, y):
+                    continue
+                self.mj_data.mocap_pos[mocap_id] = [x, y, z]
+                self.mj_data.mocap_quat[mocap_id] = [
+                    np.cos(yaw / 2),
+                    0.0,
+                    0.0,
+                    np.sin(yaw / 2),
+                ]
+                mujoco.mj_forward(self.mj_model, self.mj_data)
+                if not self._body_has_external_contact(body_id):
+                    sampled_pose = (body_name, x, y, yaw)
+                    break
+
+            if sampled_pose is None:
+                self.mj_data.mocap_pos[mocap_id] = default_pos
+                self.mj_data.mocap_quat[mocap_id] = default_quat
+                print(f"Warning: Could not find a collision-free reset pose for '{body_name}'")
+            else:
+                randomized.append(sampled_pose)
+
+    def _randomize_on_body_reset_joints(self, prefix, randomized):
+        for numeric_id in range(self.mj_model.nnumeric):
+            numeric_name = mujoco.mj_id2name(
+                self.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, numeric_id
+            )
+            if not numeric_name or not numeric_name.startswith(prefix):
+                continue
+
+            names = numeric_name[len(prefix) :].rsplit("__", 1)
+            if len(names) != 2:
+                print(f"Warning: Invalid on-body reset name '{numeric_name}'")
+                continue
+            joint_name, support_body_name = names
+            joint_id = mujoco.mj_name2id(
+                self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, joint_name
+            )
+            support_body_id = mujoco.mj_name2id(
+                self.mj_model, mujoco.mjtObj.mjOBJ_BODY, support_body_name
+            )
+            if joint_id == -1 or support_body_id == -1:
+                print(f"Warning: Invalid on-body reset targets in '{numeric_name}'")
+                continue
+            if self.mj_model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_FREE:
+                print(f"Warning: On-body reset joint '{joint_name}' is not a free joint")
+                continue
+
+            spawn_range = self._get_custom_numeric(numeric_name)
+            if spawn_range is None or len(spawn_range) != 7:
+                print(f"Warning: On-body reset '{numeric_name}' needs 7 values")
+                continue
+            dx_min, dx_max, dy_min, dy_max, z_offset, yaw_min, yaw_max = spawn_range
+            if dx_min > dx_max or dy_min > dy_max or yaw_min > yaw_max:
+                print(f"Warning: On-body reset '{numeric_name}' has invalid bounds")
+                continue
+
+            qpos_adr = self.mj_model.jnt_qposadr[joint_id]
+            qvel_adr = self.mj_model.jnt_dofadr[joint_id]
+            default_qpos = self.mj_data.qpos[qpos_adr : qpos_adr + 7].copy()
+            default_qvel = self.mj_data.qvel[qvel_adr : qvel_adr + 6].copy()
+            support_pos = self.mj_data.xpos[support_body_id]
+            support_quat = self.mj_data.xquat[support_body_id]
+            support_yaw = 2 * np.arctan2(support_quat[3], support_quat[0])
+
+            sampled_pose = None
+            for _ in range(100):
+                dx = self._reset_rng.uniform(dx_min, dx_max)
+                dy = self._reset_rng.uniform(dy_min, dy_max)
+                cos_yaw = np.cos(support_yaw)
+                sin_yaw = np.sin(support_yaw)
+                x = support_pos[0] + cos_yaw * dx - sin_yaw * dy
+                y = support_pos[1] + sin_yaw * dx + cos_yaw * dy
+                yaw = support_yaw + self._reset_rng.uniform(yaw_min, yaw_max)
+                if self._point_is_near_avoided_body(joint_name, x, y):
+                    continue
+                if self._point_violates_body_distance(joint_name, x, y):
+                    continue
+
+                self.mj_data.qpos[qpos_adr : qpos_adr + 3] = [
+                    x,
+                    y,
+                    support_pos[2] + z_offset,
+                ]
+                self.mj_data.qpos[qpos_adr + 3 : qpos_adr + 7] = [
+                    np.cos(yaw / 2),
+                    0.0,
+                    0.0,
+                    np.sin(yaw / 2),
+                ]
+                self.mj_data.qvel[qvel_adr : qvel_adr + 6] = 0.0
+                mujoco.mj_forward(self.mj_model, self.mj_data)
+                if not self._body_has_external_contact(
+                    self.mj_model.jnt_bodyid[joint_id],
+                    allowed_body_ids=(support_body_id,),
+                ):
+                    sampled_pose = (joint_name, x, y, yaw)
+                    break
+
+            if sampled_pose is None:
+                self.mj_data.qpos[qpos_adr : qpos_adr + 7] = default_qpos
+                self.mj_data.qvel[qvel_adr : qvel_adr + 6] = default_qvel
+                print(f"Warning: Could not place '{joint_name}' on '{support_body_name}'")
+            else:
+                randomized.append(sampled_pose)
+
+    def _get_custom_numeric(self, name):
+        numeric_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, name)
+        if numeric_id == -1:
+            return None
+        numeric_size = self.mj_model.numeric_size[numeric_id]
+        numeric_adr = self.mj_model.numeric_adr[numeric_id]
+        return self.mj_model.numeric_data[numeric_adr : numeric_adr + numeric_size]
+
+    @staticmethod
+    def _point_is_near_aabb(x, y, avoid_aabb):
+        x_min, x_max, y_min, y_max, clearance = avoid_aabb
+        dx = max(x_min - x, 0.0, x - x_max)
+        dy = max(y_min - y, 0.0, y - y_max)
+        return np.hypot(dx, dy) < clearance
+
+    def _point_is_near_avoided_body(self, joint_name, x, y):
+        prefix = f"spawn_avoid_body_{joint_name}_"
+        for numeric_id in range(self.mj_model.nnumeric):
+            numeric_name = mujoco.mj_id2name(
+                self.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, numeric_id
+            )
+            if not numeric_name or not numeric_name.startswith(prefix):
+                continue
+            body_name = numeric_name[len(prefix) :]
+            min_distance = self._get_custom_numeric(numeric_name)
+            body_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if min_distance is None or len(min_distance) != 1 or body_id == -1:
+                print(f"Warning: Invalid avoided-body config '{numeric_name}'")
+                continue
+            body_distance = np.hypot(
+                x - self.mj_data.xpos[body_id, 0],
+                y - self.mj_data.xpos[body_id, 1],
+            )
+            if body_distance < min_distance[0]:
+                return True
+        return False
+
+    def _point_violates_body_distance(self, object_name, x, y):
+        prefix = f"spawn_distance_body_{object_name}_"
+        for numeric_id in range(self.mj_model.nnumeric):
+            numeric_name = mujoco.mj_id2name(
+                self.mj_model, mujoco.mjtObj.mjOBJ_NUMERIC, numeric_id
+            )
+            if not numeric_name or not numeric_name.startswith(prefix):
+                continue
+            body_name = numeric_name[len(prefix) :]
+            distance_range = self._get_custom_numeric(numeric_name)
+            body_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if distance_range is None or len(distance_range) != 2 or body_id == -1:
+                print(f"Warning: Invalid body-distance config '{numeric_name}'")
+                continue
+            min_distance, max_distance = distance_range
+            body_distance = np.hypot(
+                x - self.mj_data.xpos[body_id, 0],
+                y - self.mj_data.xpos[body_id, 1],
+            )
+            if min_distance > max_distance or not min_distance <= body_distance <= max_distance:
+                return True
+        return False
+
+    def _body_has_external_contact(self, body_id, allowed_body_ids=()):
+        allowed_body_ids = {0, body_id, *allowed_body_ids}
+        for contact_id in range(self.mj_data.ncon):
+            contact = self.mj_data.contact[contact_id]
+            body_1 = self.mj_model.geom_bodyid[contact.geom1]
+            body_2 = self.mj_model.geom_bodyid[contact.geom2]
+            if body_1 == body_id and body_2 not in allowed_body_ids:
+                return True
+            if body_2 == body_id and body_1 not in allowed_body_ids:
+                return True
+        return False
+
+    def _free_joint_has_external_contact(self, joint_id):
+        body_id = self.mj_model.jnt_bodyid[joint_id]
+        return self._body_has_external_contact(body_id)
+
+    def reset(self, randomize_spawns=False):
         mujoco.mj_resetData(self.mj_model, self.mj_data)
+        if randomize_spawns:
+            self._randomize_reset_spawns()
 
 
 class BaseSimulator:

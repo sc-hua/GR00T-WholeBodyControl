@@ -34,6 +34,7 @@ Usage (from repo root — no venv activation needed):
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import os
 import shutil
@@ -68,6 +69,14 @@ def _bootstrap_venv():
 _bootstrap_venv()
 
 import tyro
+
+
+def _timestamped_dataset_name(prefix: str, now: datetime | None = None) -> str:
+    """Build one filesystem-friendly dataset name with a local-time suffix."""
+
+    timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    normalized_prefix = prefix.rstrip("-_")
+    return f"{normalized_prefix}_{timestamp}" if normalized_prefix else timestamp
 
 
 def _get_local_ip() -> str:
@@ -137,7 +146,10 @@ class DataCollectionLaunchConfig:
     """Language task prompt for the data exporter."""
 
     dataset_name: str = ""
-    """Dataset name for the data exporter. Leave empty to auto-generate from timestamp."""
+    """Dataset name prefix for the data exporter."""
+
+    append_dataset_timestamp: bool = True
+    """Append a YYYYMMDD_HHMMSS timestamp to the dataset name prefix."""
 
     data_exporter_frequency: int = 50
     """Data collection frequency (Hz) for the data exporter."""
@@ -153,13 +165,19 @@ class DataCollectionLaunchConfig:
     """Start the camera viewer pane."""
 
     xr_camera_viewer: bool = False
-    """Stream the SONIC ego camera to PICO or an IsaacTeleop preview."""
+    """Stream a SONIC camera to PICO or an IsaacTeleop preview."""
 
     xr_camera_backend: str = "xrobotoolkit"
     """XR camera backend (xrobotoolkit or isaac-teleop)."""
 
     xr_camera_mode: str = "xr"
     """Embedded IsaacTeleop camera display mode (xr or window)."""
+
+    xr_camera_image_key: str = "ego_view"
+    """SONIC image stream sent to the XR camera viewer (ego_view or third_person_view)."""
+
+    xr_camera_layout: str = "single"
+    """PICO view layout (single, dual_view, or dashboard)."""
 
     camera_host: str = "localhost"
     """Camera server host (shared by data exporter and viewer)."""
@@ -212,6 +230,11 @@ def _check_prerequisites(config: DataCollectionLaunchConfig):
 
     if config.xr_camera_mode not in {"xr", "window"}:
         errors.append("--xr-camera-mode must be one of: xr, window")
+
+    if config.xr_camera_layout not in {"single", "dual_view", "dashboard"}:
+        errors.append(
+            "--xr-camera-layout must be one of: single, dual_view, dashboard"
+        )
 
     if config.xr_camera_viewer and config.xr_camera_backend == "isaac-teleop":
         camera_viz_dir = repo_root / "external_dependencies" / "IsaacTeleop" / "examples" / "camera_viz"
@@ -319,6 +342,9 @@ def _check_pane_alive(pane_index: int) -> bool:
 def main(config: DataCollectionLaunchConfig):
     repo_root = Path(__file__).resolve().parent.parent.parent
 
+    if config.append_dataset_timestamp:
+        config.dataset_name = _timestamped_dataset_name(config.dataset_name)
+
     _check_prerequisites(config)
     _kill_existing_session()
 
@@ -339,6 +365,9 @@ def main(config: DataCollectionLaunchConfig):
         f"  XR camera:       "
         f"{config.xr_camera_backend if config.xr_camera_viewer else 'No'}"
     )
+    if config.xr_camera_viewer:
+        print(f"  XR image stream: {config.xr_camera_image_key}")
+        print(f"  XR layout:       {config.xr_camera_layout}")
     print(f"  Wrist cameras:   {'Yes' if config.record_wrist_cameras else 'No'}")
     print(f"  Text-to-speech:  {'Yes' if config.text_to_speech else 'No'}")
     print(f"  PC IP (for PICO): {_get_local_ip()}")
@@ -431,7 +460,9 @@ def main(config: DataCollectionLaunchConfig):
                 f"source .venv_data_collection/bin/activate && "
                 f"python gear_sonic/scripts/run_xrobotoolkit_video_sender.py "
                 f"--camera-host {config.camera_host} "
-                f"--camera-port {config.camera_port}"
+                f"--camera-port {config.camera_port} "
+                f"--image-key {config.xr_camera_image_key} "
+                f"--layout {config.xr_camera_layout}"
             )
         else:
             camera_viz_dir = (

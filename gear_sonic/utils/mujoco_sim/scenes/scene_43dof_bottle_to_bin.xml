@@ -1,0 +1,132 @@
+<mujoco model="g1_43dof bottle to bin scene">
+  <include file="../../../data/robot_model/model_data/g1/g1_29dof_with_hand.xml"/>
+  <compiler angle="radian" meshdir="../../../data/robot_model/model_data/g1/meshes"/>
+
+  <!--
+    Whole-body teleoperation task: pick up three bottles from a nearby table,
+    walk to the open trash bin, and drop them inside. Backspace randomizes the
+    table, bin, bottle count (one or two), and poses while keeping the layout
+    collision-free.
+  -->
+  <statistic center="0.45 0 0.60" extent="2.1"/>
+
+  <custom>
+    <!-- center_x center_y radius_min radius_max z yaw_min yaw_max -->
+    <numeric name="random_spawn_annulus_body_trash_bin"
+             data="0 0 0.90 1.15 0 -3.141593 3.141593"/>
+    <numeric name="random_spawn_annulus_body_bottle_table"
+             data="0 0 0.65 0.85 0 -3.141593 3.141593"/>
+    <numeric name="spawn_distance_body_bottle_table_trash_bin" data="0.85 1.20"/>
+
+    <!-- Local table coordinates and body-origin height above table body's z. -->
+    <numeric name="random_spawn_on_body_bottle_1_free__bottle_table"
+             data="-0.25 0.25 -0.19 0.19 0.728 -3.141593 3.141593"/>
+    <numeric name="random_spawn_on_body_bottle_2_free__bottle_table"
+             data="-0.25 0.25 -0.19 0.19 0.728 -3.141593 3.141593"/>
+    <!-- Bottle 1 is always active; bottle 2 is present on half of randomized resets. -->
+    <numeric name="random_presence_bottle_2_free" data="0.5 0 0 -2"/>
+
+    <!-- Keep grasp clearance between bottles. -->
+    <numeric name="spawn_avoid_body_bottle_2_free_bottle_1" data="0.13"/>
+  </custom>
+
+  <visual>
+    <headlight diffuse="0.65 0.65 0.65" ambient="0.32 0.32 0.32" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.20 0.30 0.40" rgb2="0.10 0.20 0.30" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+    <material name="table_mat" rgba="0.65 0.43 0.22 1"/>
+    <material name="bin_mat" rgba="0.12 0.15 0.18 1"/>
+    <material name="bin_rim_mat" rgba="0.10 0.72 0.34 1"/>
+    <material name="bottle_blue" rgba="0.12 0.48 0.90 0.92"/>
+    <material name="bottle_orange" rgba="0.95 0.38 0.08 0.92"/>
+    <material name="cap_mat" rgba="0.93 0.93 0.93 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0.5 0 2.3" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <site name="com_marker" pos="0.1 0 0" size="0.05" rgba="1 0 0 1" type="sphere"/>
+    <camera name="third_person_camera" mode="targetbody" target="pelvis"
+            pos="1.8 -1.8 1.7" fovy="62"/>
+
+    <!-- Source table, top surface at z=0.72 m. -->
+    <body name="bottle_table" mocap="true" pos="0.68 -0.35 0">
+      <geom name="bottle_table_top" type="box" size="0.34 0.28 0.025"
+            pos="0 0 0.695" material="table_mat" friction="1.2 0.03 0.002"/>
+      <geom name="bottle_table_leg_1" type="box" size="0.025 0.025 0.335"
+            pos="0.28 0.22 0.335" material="table_mat"/>
+      <geom name="bottle_table_leg_2" type="box" size="0.025 0.025 0.335"
+            pos="0.28 -0.22 0.335" material="table_mat"/>
+      <geom name="bottle_table_leg_3" type="box" size="0.025 0.025 0.335"
+            pos="-0.28 0.22 0.335" material="table_mat"/>
+      <geom name="bottle_table_leg_4" type="box" size="0.025 0.025 0.335"
+            pos="-0.28 -0.22 0.335" material="table_mat"/>
+    </body>
+
+    <!-- Open-top square trash bin: 40 x 40 cm inner opening, top at z=0.60 m. -->
+    <body name="trash_bin" mocap="true" pos="0.72 0.62 0">
+      <geom name="trash_bin_bottom" type="box" size="0.23 0.23 0.025"
+            pos="0 0 0.025" material="bin_mat" friction="1.0 0.02 0.001"/>
+      <geom name="trash_bin_front" type="box" size="0.025 0.23 0.275"
+            pos="0.225 0 0.325" material="bin_mat"/>
+      <geom name="trash_bin_back" type="box" size="0.025 0.23 0.275"
+            pos="-0.225 0 0.325" material="bin_mat"/>
+      <geom name="trash_bin_left" type="box" size="0.20 0.025 0.275"
+            pos="0 0.225 0.325" material="bin_mat"/>
+      <geom name="trash_bin_right" type="box" size="0.20 0.025 0.275"
+            pos="0 -0.225 0.325" material="bin_mat"/>
+
+      <!-- Bright rim makes the target opening easy to identify in the headset. -->
+      <geom name="trash_bin_rim_front" type="box" size="0.018 0.245 0.018"
+            pos="0.243 0 0.618" material="bin_rim_mat"/>
+      <geom name="trash_bin_rim_back" type="box" size="0.018 0.245 0.018"
+            pos="-0.243 0 0.618" material="bin_rim_mat"/>
+      <geom name="trash_bin_rim_left" type="box" size="0.225 0.018 0.018"
+            pos="0 0.243 0.618" material="bin_rim_mat"/>
+      <geom name="trash_bin_rim_right" type="box" size="0.225 0.018 0.018"
+            pos="0 -0.243 0.618" material="bin_rim_mat"/>
+    </body>
+
+    <!-- Three lightweight, one-hand graspable bottles. Body origin is at the base. -->
+    <body name="bottle_1" pos="0.57 -0.43 0.728">
+      <freejoint name="bottle_1_free"/>
+      <inertial pos="0 0 0.075" mass="0.12" diaginertia="0.00035 0.00035 0.00012"/>
+      <geom name="bottle_1_body" type="cylinder" size="0.038 0.065" pos="0 0 0.065"
+            material="bottle_blue" density="0" friction="1.8 0.04 0.002"/>
+      <geom name="bottle_1_shoulder" type="capsule" size="0.032 0.020" pos="0 0 0.135"
+            material="bottle_blue" density="0"/>
+      <geom name="bottle_1_neck" type="cylinder" size="0.022 0.025" pos="0 0 0.165"
+            material="bottle_blue" density="0"/>
+      <geom name="bottle_1_cap" type="cylinder" size="0.024 0.010" pos="0 0 0.200"
+            material="cap_mat" density="0" friction="2.0 0.04 0.002"/>
+    </body>
+
+    <body name="bottle_2" pos="0.72 -0.35 0.728">
+      <freejoint name="bottle_2_free"/>
+      <inertial pos="0 0 0.075" mass="0.12" diaginertia="0.00035 0.00035 0.00012"/>
+      <geom name="bottle_2_body" type="cylinder" size="0.038 0.065" pos="0 0 0.065"
+            material="bottle_orange" density="0" friction="1.8 0.04 0.002"/>
+      <geom name="bottle_2_shoulder" type="capsule" size="0.032 0.020" pos="0 0 0.135"
+            material="bottle_orange" density="0"/>
+      <geom name="bottle_2_neck" type="cylinder" size="0.022 0.025" pos="0 0 0.165"
+            material="bottle_orange" density="0"/>
+      <geom name="bottle_2_cap" type="cylinder" size="0.024 0.010" pos="0 0 0.200"
+            material="cap_mat" density="0" friction="2.0 0.04 0.002"/>
+    </body>
+
+  </worldbody>
+
+  <default>
+    <geom friction="1.0"/>
+  </default>
+</mujoco>

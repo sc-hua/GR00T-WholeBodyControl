@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream the SONIC ego camera through XRoboToolkit Remote Vision."""
+"""Stream a selected SONIC camera through XRoboToolkit Remote Vision."""
 
 from __future__ import annotations
 
@@ -44,6 +44,12 @@ def main() -> None:
     parser.add_argument("--camera-port", type=int, default=5555)
     parser.add_argument("--image-key", default="ego_view")
     parser.add_argument(
+        "--layout",
+        choices=("single", "dual_view", "dashboard"),
+        default="single",
+        help="single camera, main view with ego inset, or main + ego/wrist dashboard",
+    )
+    parser.add_argument(
         "--encoder",
         choices=("auto", "h264_nvenc", "libx264"),
         default="auto",
@@ -61,6 +67,7 @@ def main() -> None:
         camera_host=args.camera_host,
         camera_port=args.camera_port,
         image_key=args.image_key,
+        layout=args.layout,
         encoder=args.encoder,
     )
     try:
