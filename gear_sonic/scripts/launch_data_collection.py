@@ -153,7 +153,10 @@ class DataCollectionLaunchConfig:
     """Start the camera viewer pane."""
 
     xr_camera_viewer: bool = False
-    """Stream the SONIC ego camera to PICO through the embedded IsaacTeleop."""
+    """Stream the SONIC ego camera to PICO or an IsaacTeleop preview."""
+
+    xr_camera_backend: str = "xrobotoolkit"
+    """XR camera backend (xrobotoolkit or isaac-teleop)."""
 
     xr_camera_mode: str = "xr"
     """Embedded IsaacTeleop camera display mode (xr or window)."""
@@ -204,10 +207,13 @@ def _check_prerequisites(config: DataCollectionLaunchConfig):
     if config.pico_input_source not in {"xrt", "isaac-teleop"}:
         errors.append("--pico-input-source must be one of: xrt, isaac-teleop")
 
+    if config.xr_camera_backend not in {"xrobotoolkit", "isaac-teleop"}:
+        errors.append("--xr-camera-backend must be one of: xrobotoolkit, isaac-teleop")
+
     if config.xr_camera_mode not in {"xr", "window"}:
         errors.append("--xr-camera-mode must be one of: xr, window")
 
-    if config.xr_camera_viewer:
+    if config.xr_camera_viewer and config.xr_camera_backend == "isaac-teleop":
         camera_viz_dir = repo_root / "external_dependencies" / "IsaacTeleop" / "examples" / "camera_viz"
         if config.xr_camera_mode == "xr" and config.pico_input_source != "isaac-teleop":
             errors.append(
@@ -331,7 +337,7 @@ def main(config: DataCollectionLaunchConfig):
     print(f"  Camera viewer:   {'Yes' if config.camera_viewer else 'No'}")
     print(
         f"  XR camera:       "
-        f"{config.xr_camera_mode if config.xr_camera_viewer else 'No'}"
+        f"{config.xr_camera_backend if config.xr_camera_viewer else 'No'}"
     )
     print(f"  Wrist cameras:   {'Yes' if config.record_wrist_cameras else 'No'}")
     print(f"  Text-to-speech:  {'Yes' if config.text_to_speech else 'No'}")
@@ -415,26 +421,39 @@ def main(config: DataCollectionLaunchConfig):
 
     # --- Optional window: robot ego camera in PICO / desktop ---
     if config.xr_camera_viewer:
-        camera_viz_dir = (
-            repo_root / "external_dependencies" / "IsaacTeleop" / "examples" / "camera_viz"
-        )
         subprocess.run(
             ["tmux", "new-window", "-d", "-t", SESSION_NAME, "-n", "xr_camera"],
             check=True,
         )
-        if config.xr_camera_mode == "xr":
-            wait_for_user = (
-                "echo 'Connect the PICO WebXR client to CloudXR first.' && "
-                "read -r -p 'Then press Enter here to start the robot camera in PICO: ' && "
+        if config.xr_camera_backend == "xrobotoolkit":
+            xr_camera_cmd = (
+                f"cd {repo_root} && "
+                f"source .venv_data_collection/bin/activate && "
+                f"python gear_sonic/scripts/run_xrobotoolkit_video_sender.py "
+                f"--camera-host {config.camera_host} "
+                f"--camera-port {config.camera_port}"
             )
         else:
-            wait_for_user = ""
-        xr_camera_cmd = (
-            f"cd {camera_viz_dir} && "
-            f"{wait_for_user}"
-            f"./camera_viz.sh run configs/sonic_zmq.yaml "
-            f"--mode {config.xr_camera_mode}"
-        )
+            camera_viz_dir = (
+                repo_root
+                / "external_dependencies"
+                / "IsaacTeleop"
+                / "examples"
+                / "camera_viz"
+            )
+            if config.xr_camera_mode == "xr":
+                wait_for_user = (
+                    "echo 'Connect the PICO WebXR client to CloudXR first.' && "
+                    "read -r -p 'Then press Enter here to start the robot camera in PICO: ' && "
+                )
+            else:
+                wait_for_user = ""
+            xr_camera_cmd = (
+                f"cd {camera_viz_dir} && "
+                f"{wait_for_user}"
+                f"./camera_viz.sh run configs/sonic_zmq.yaml "
+                f"--mode {config.xr_camera_mode}"
+            )
         subprocess.run(
             [
                 "tmux",
@@ -501,7 +520,9 @@ def main(config: DataCollectionLaunchConfig):
         print()
     if config.xr_camera_viewer:
         print("  Window 'xr_camera':")
-        if config.xr_camera_mode == "xr":
+        if config.xr_camera_backend == "xrobotoolkit":
+            print("    Select ZEDMINI in PICO, tap Listen, and enter the PC IP")
+        elif config.xr_camera_mode == "xr":
             print("    Connect PICO WebXR, switch here, then press Enter")
         else:
             print("    SONIC ego camera desktop preview")
