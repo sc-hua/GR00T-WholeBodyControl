@@ -41,6 +41,13 @@ Usage:
         --dataset-path outputs/my_dataset \\
         --output-path outputs/my_dataset_cleaned \\
         --remove-discarded
+
+    # Apply keep/discard/trim decisions from the local review web app
+    python gear_sonic/scripts/process_dataset.py \\
+        --dataset-path outputs/my_dataset \\
+        --output-path outputs/my_dataset_reviewed \\
+        --review-file outputs/my_dataset/meta/review.jsonl \\
+        --no-remove-stale-smpl
 """
 
 from dataclasses import dataclass, field
@@ -53,7 +60,6 @@ import av
 import numpy as np
 import pandas as pd
 import tyro
-
 
 SMPL_POSE_COLUMN = "teleop.smpl_pose"
 
@@ -118,6 +124,28 @@ def load_tasks_meta(dataset_path: Path) -> list[dict]:
                 if line:
                     tasks.append(json.loads(line))
     return tasks
+
+
+def load_review_manifest(path: Path) -> dict[int, dict]:
+    """Load the latest manual review decision for each episode."""
+    reviews: dict[int, dict] = {}
+    with open(path, encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            if "episode_index" not in item or "status" not in item:
+                raise ValueError(
+                    f"Review line {line_number} needs episode_index and status"
+                )
+            status = item["status"]
+            if status not in {"unreviewed", "keep", "discard", "trim"}:
+                raise ValueError(
+                    f"Review line {line_number} has invalid status: {status}"
+                )
+            reviews[int(item["episode_index"])] = item
+    return reviews
 
 
 def get_parquet_path(dataset_path: Path, info: dict, episode_index: int) -> Path:
@@ -244,6 +272,8 @@ def process_single_dataset(
     remove_stale_smpl: bool,
     remove_discarded: bool = False,
     episode_index_offset: int = 0,
+    reviews: dict[int, dict] | None = None,
+    include_unreviewed: bool = False,
 ) -> dict:
     """Process one dataset: optionally clean stale SMPL frames.
 
@@ -265,6 +295,10 @@ def process_single_dataset(
         "frozen_leadin_frames": 0,
         "episodes_dropped": 0,
         "episodes_discarded": 0,
+        "episodes_review_discarded": 0,
+        "episodes_unreviewed": 0,
+        "episodes_trimmed": 0,
+        "review_frames_removed": 0,
     }
     processed_episodes = []
 
@@ -274,6 +308,17 @@ def process_single_dataset(
         if ep_idx in discarded_indices:
             stats["episodes_discarded"] += 1
             print(f"  Episode {ep_idx}: discarded during collection — removing")
+            continue
+
+        review = reviews.get(ep_idx) if reviews is not None else None
+        review_status = review.get("status", "unreviewed") if review else "unreviewed"
+        if reviews is not None and review_status == "discard":
+            stats["episodes_review_discarded"] += 1
+            print(f"  Episode {ep_idx}: discarded during manual review — removing")
+            continue
+        if reviews is not None and review_status == "unreviewed" and not include_unreviewed:
+            stats["episodes_unreviewed"] += 1
+            print(f"  Episode {ep_idx}: not manually reviewed — removing")
             continue
 
         parquet_path = get_parquet_path(dataset_path, info, ep_idx)
@@ -287,7 +332,32 @@ def process_single_dataset(
         ep_len = len(df)
         stats["total_frames"] += ep_len
 
-        valid_indices = None
+        keep_mask = np.ones(ep_len, dtype=bool)
+
+        if review_status == "trim":
+            trim_start = review.get("trim_start")
+            trim_end = review.get("trim_end")
+            if trim_start is None or trim_end is None:
+                raise ValueError(
+                    f"Episode {ep_idx}: trim review needs trim_start and trim_end"
+                )
+            start_idx = int(round(float(trim_start) * fps))
+            end_idx = int(round(float(trim_end) * fps))
+            start_idx = max(0, min(ep_len, start_idx))
+            end_idx = max(0, min(ep_len, end_idx))
+            if start_idx >= end_idx:
+                raise ValueError(
+                    f"Episode {ep_idx}: invalid trim frames [{start_idx}, {end_idx})"
+                )
+            keep_mask[:start_idx] = False
+            keep_mask[end_idx:] = False
+            n_review_remove = int((~keep_mask).sum())
+            stats["episodes_trimmed"] += 1
+            stats["review_frames_removed"] += n_review_remove
+            print(
+                f"  Episode {ep_idx}: manual trim [{start_idx}, {end_idx}) — "
+                f"removing {n_review_remove}/{ep_len} frames"
+            )
 
         if remove_stale_smpl and SMPL_POSE_COLUMN in df.columns:
             smpl_arr = np.vstack(
@@ -300,7 +370,6 @@ def process_single_dataset(
 
             if n_remove > 0:
                 stats["episodes_with_stale"] += 1
-                stats["frames_removed"] += n_remove
                 stats["zero_frames"] += n_zero
                 stats["frozen_leadin_frames"] += n_frozen
                 pct = 100.0 * n_remove / ep_len
@@ -309,15 +378,22 @@ def process_single_dataset(
                     f"({pct:.1f}%) — {n_zero} zero + {n_frozen} frozen lead-in"
                 )
 
-                if n_remove == ep_len:
-                    print(f"  Episode {ep_idx}: ALL frames stale — dropping episode")
-                    stats["episodes_dropped"] += 1
-                    continue
+                keep_mask &= ~mask
 
-                valid_indices = np.where(~mask)[0]
-                df = df.iloc[valid_indices].copy().reset_index(drop=True)
-                if "timestamp" in df.columns:
-                    df["timestamp"] -= df["timestamp"].iloc[0]
+        n_remove_total = int((~keep_mask).sum())
+        if n_remove_total == ep_len:
+            print(f"  Episode {ep_idx}: ALL frames removed — dropping episode")
+            stats["episodes_dropped"] += 1
+            stats["frames_removed"] += n_remove_total
+            continue
+
+        valid_indices = None
+        if n_remove_total:
+            stats["frames_removed"] += n_remove_total
+            valid_indices = np.where(keep_mask)[0]
+            df = df.iloc[valid_indices].copy().reset_index(drop=True)
+            if "timestamp" in df.columns:
+                df["timestamp"] -= df["timestamp"].iloc[0]
 
         new_ep_idx = ep_idx + episode_index_offset
         processed_episodes.append({
@@ -463,6 +539,13 @@ class ProcessDatasetConfig:
     """Remove episodes that were flagged as discarded during data collection
     (stored in meta/info.json under discarded_episode_indices)."""
 
+    review_file: Optional[str] = None
+    """Manual review JSONL written by run_dataset_review.py. Requires
+    --output-path so the source dataset remains unchanged."""
+
+    include_unreviewed: bool = False
+    """Keep episodes without an explicit review decision when --review-file is used."""
+
 
 def main(cfg: ProcessDatasetConfig):
     dataset_paths = [Path(p) for p in cfg.dataset_path]
@@ -494,6 +577,21 @@ def main(cfg: ProcessDatasetConfig):
         print("ERROR: --output-path is required when merging multiple datasets.")
         raise SystemExit(1)
 
+    if cfg.review_file and in_place:
+        print("ERROR: --review-file requires --output-path (manual review is non-destructive).")
+        raise SystemExit(1)
+
+    reviews = None
+    if cfg.review_file:
+        review_path = Path(cfg.review_file)
+        if not review_path.exists():
+            print(f"ERROR: Review manifest does not exist: {review_path}")
+            raise SystemExit(1)
+        if merging:
+            print("ERROR: --review-file currently supports one already-merged dataset at a time.")
+            raise SystemExit(1)
+        reviews = load_review_manifest(review_path)
+
     output_path = Path(cfg.output_path) if cfg.output_path else dataset_paths[0]
 
     print("=" * 70)
@@ -505,6 +603,9 @@ def main(cfg: ProcessDatasetConfig):
     print(f"  Output:               {output_path}{'  (in-place)' if in_place else ''}")
     print(f"  Remove stale SMPL:    {cfg.remove_stale_smpl}")
     print(f"  Remove discarded:     {cfg.remove_discarded}")
+    print(f"  Manual review:        {cfg.review_file or '(none)'}")
+    if cfg.review_file:
+        print(f"  Include unreviewed:   {cfg.include_unreviewed}")
     print("=" * 70)
 
     # Validate script configs match across all datasets
@@ -537,6 +638,10 @@ def main(cfg: ProcessDatasetConfig):
         "frozen_leadin_frames": 0,
         "episodes_dropped": 0,
         "episodes_discarded": 0,
+        "episodes_review_discarded": 0,
+        "episodes_unreviewed": 0,
+        "episodes_trimmed": 0,
+        "review_frames_removed": 0,
     }
     reference_info = None
 
@@ -547,6 +652,8 @@ def main(cfg: ProcessDatasetConfig):
             remove_stale_smpl=cfg.remove_stale_smpl,
             remove_discarded=cfg.remove_discarded,
             episode_index_offset=len(all_episodes),
+            reviews=reviews,
+            include_unreviewed=cfg.include_unreviewed,
         )
 
         if reference_info is None:
@@ -620,19 +727,31 @@ def main(cfg: ProcessDatasetConfig):
             output_path, all_episodes, reference_info, all_tasks_meta, script_config,
         )
         copy_modality_json(dataset_paths, output_path)
+        if cfg.review_file:
+            shutil.copy2(cfg.review_file, output_path / "meta" / "source_review.jsonl")
 
     # Print summary
     kept = total_stats["total_frames"] - total_stats["frames_removed"]
-    kept_episodes = total_stats["total_episodes"] - total_stats["episodes_dropped"] - total_stats["episodes_discarded"]
+    kept_episodes = (
+        total_stats["total_episodes"]
+        - total_stats["episodes_dropped"]
+        - total_stats["episodes_discarded"]
+        - total_stats["episodes_review_discarded"]
+        - total_stats["episodes_unreviewed"]
+    )
 
     print("\n" + "=" * 70)
     print("  Processing complete!")
     print("=" * 70)
     print(f"  Episodes:  {kept_episodes} kept / {total_stats['total_episodes']} total"
-          f"  ({total_stats['episodes_dropped']} dropped, {total_stats['episodes_discarded']} discarded)")
+          f"  ({total_stats['episodes_dropped']} dropped, "
+          f"{total_stats['episodes_discarded']} collection-discarded, "
+          f"{total_stats['episodes_review_discarded']} review-discarded, "
+          f"{total_stats['episodes_unreviewed']} unreviewed)")
     print(f"  Frames:    {kept} kept / {total_stats['total_frames']} total"
           f"  ({total_stats['frames_removed']} removed)")
     if total_stats["frames_removed"] > 0:
+        print(f"    Manual trim:     {total_stats['review_frames_removed']}")
         print(f"    Zero SMPL:       {total_stats['zero_frames']}")
         print(f"    Frozen lead-in:  {total_stats['frozen_leadin_frames']}")
         print(f"    Episodes affected: {total_stats['episodes_with_stale']}")

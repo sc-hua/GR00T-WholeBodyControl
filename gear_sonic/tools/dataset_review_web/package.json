@@ -1,0 +1,37 @@
+{
+  "name": "sonic-episode-review-studio",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "start": "vite preview",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "camera-controls": "^3.1.2",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "three": "^0.185.1",
+    "urdf-loader": "^0.13.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/three": "^0.185.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "eslint": "9.39.4",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^16.4.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.59.3",
+    "vite": "^8.2.0"
+  },
+  "type": "module"
+}

@@ -494,6 +494,47 @@ pick up every bottle from the table and put it into the trash bin
 它对单瓶场景语义仍成立。部署时最好使用相同提示词，后续继续采集则建议统一改成单数版本，避免同一
 任务出现不必要的语言差异。
 
+### 7.1 本地网页人工审核
+
+仓库提供了 Episode Review Studio，用于对已经保存为可用的数据再次人工复核：
+
+```bash
+source .venv_data_collection/bin/activate
+python gear_sonic/scripts/run_dataset_review.py \
+  --dataset-path outputs/pico_bottle_to_bin_merged_20260802
+```
+
+启动器会打开 `http://127.0.0.1:3000`。网页同步显示第一人称视频、仓库中真实
+`g1_29dof_with_hand.urdf` + STL 网格、实际关节/控制指令曲线、stream mode 时间条和当前帧。
+模型按数据里的 `joint_names` 驱动全部 43 个机身与手部关节，而不是使用固定下标猜测关节轴。支持：
+
+- 从 episode 全时长均匀抽取 12 张视频帧形成总截图时间轴，点击截图即可同步跳转；
+- 审核操作区位于总时间轴下方，便于先浏览全局、再保留/丢弃/裁切；
+- 在操作区下方同时绘制全部 43 个关节的状态/指令轨道，可逐个隐藏或显示，也可全选/全不选；
+- `K`：保留整个 episode；
+- `D`：丢弃整个 episode；
+- `I` / `O`：设置同步裁切的起点和终点；
+- `Space`：播放/暂停；方向键跳转时间；
+- 填写人工审核备注，并按状态筛选 episode。
+
+审核结果会立即原子化保存到数据集的 `meta/review.jsonl`，不会改动原 parquet 或 MP4。全部审核后，
+用同一个清单生成新的训练集：
+
+```bash
+source .venv_data_collection/bin/activate
+python gear_sonic/scripts/process_dataset.py \
+  --dataset-path outputs/pico_bottle_to_bin_merged_20260802 \
+  --output-path outputs/pico_bottle_to_bin_reviewed \
+  --review-file outputs/pico_bottle_to_bin_merged_20260802/meta/review.jsonl \
+  --no-remove-stale-smpl
+```
+
+传入 review 文件时，未审核 episode 默认不进入输出；如确实需要保留可加 `--include-unreviewed`。
+`trim` 会用相同帧索引裁剪 parquet 和所有视频，并重建 timestamp、frame index、episode index 和
+全局 index。输出保留 `meta/source_review.jsonl` 作为审核记录。三维视图使用真实 G1 URDF 关节树和
+原始 mesh，但当前 `observation.state` 只包含 43 个关节角，没有 floating-base 的世界位置和朝向，
+因此网页中 pelvis 固定在展示原点；它仍不是完整的 MuJoCo 物理状态回放。
+
 训练应在相邻仓库 `/data/pateo/proj/robot/Isaac-GR00T` 中使用 GR00T N1.7 和
 `UNITREE_G1_SONIC`。当前工作站只有一张 16GB RTX A4000；官方建议微调使用 40GB 以上显存，且
 当前 Isaac-GR00T 尚未创建 `.venv`、系统没有 `ffmpeg` 命令、Hugging Face 也没有可用登录 token，
