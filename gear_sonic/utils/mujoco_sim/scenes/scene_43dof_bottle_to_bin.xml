@@ -3,10 +3,9 @@
   <compiler angle="radian" meshdir="../../../data/robot_model/model_data/g1/meshes"/>
 
   <!--
-    Whole-body teleoperation task: pick up three bottles from a nearby table,
-    walk to the open trash bin, and drop them inside. Backspace randomizes the
-    table, bin, bottle count (one or two), and poses while keeping the layout
-    collision-free.
+    Whole-body teleoperation task: pick up one bottle from a nearby table,
+    walk to the open trash bin, and drop it inside. Backspace randomizes the
+    table, bin, and bottle pose while keeping the layout collision-free.
   -->
   <statistic center="0.45 0 0.60" extent="2.1"/>
 
@@ -21,13 +20,6 @@
     <!-- Local table coordinates and body-origin height above table body's z. -->
     <numeric name="random_spawn_on_body_bottle_1_free__bottle_table"
              data="-0.25 0.25 -0.19 0.19 0.728 -3.141593 3.141593"/>
-    <numeric name="random_spawn_on_body_bottle_2_free__bottle_table"
-             data="-0.25 0.25 -0.19 0.19 0.728 -3.141593 3.141593"/>
-    <!-- Bottle 1 is always active; bottle 2 is present on half of randomized resets. -->
-    <numeric name="random_presence_bottle_2_free" data="0.5 0 0 -2"/>
-
-    <!-- Keep grasp clearance between bottles. -->
-    <numeric name="spawn_avoid_body_bottle_2_free_bottle_1" data="0.13"/>
   </custom>
 
   <visual>
@@ -48,7 +40,6 @@
     <material name="bin_mat" rgba="0.12 0.15 0.18 1"/>
     <material name="bin_rim_mat" rgba="0.10 0.72 0.34 1"/>
     <material name="bottle_blue" rgba="0.12 0.48 0.90 0.92"/>
-    <material name="bottle_orange" rgba="0.95 0.38 0.08 0.92"/>
     <material name="cap_mat" rgba="0.93 0.93 0.93 1"/>
   </asset>
 
@@ -97,36 +88,32 @@
             pos="0 -0.243 0.618" material="bin_rim_mat"/>
     </body>
 
-    <!-- Three lightweight, one-hand graspable bottles. Body origin is at the base. -->
+    <!-- One lightweight, one-hand graspable bottle. Body origin is at the base. -->
     <body name="bottle_1" pos="0.57 -0.43 0.728">
       <freejoint name="bottle_1_free"/>
       <inertial pos="0 0 0.075" mass="0.12" diaginertia="0.00035 0.00035 0.00012"/>
       <geom name="bottle_1_body" type="cylinder" size="0.038 0.065" pos="0 0 0.065"
-            material="bottle_blue" density="0" friction="1.8 0.04 0.002"/>
+            class="bottle_contact" material="bottle_blue" density="0"/>
       <geom name="bottle_1_shoulder" type="capsule" size="0.032 0.020" pos="0 0 0.135"
-            material="bottle_blue" density="0"/>
+            class="bottle_contact" material="bottle_blue" density="0"/>
       <geom name="bottle_1_neck" type="cylinder" size="0.022 0.025" pos="0 0 0.165"
-            material="bottle_blue" density="0"/>
+            class="bottle_contact" material="bottle_blue" density="0"/>
       <geom name="bottle_1_cap" type="cylinder" size="0.024 0.010" pos="0 0 0.200"
-            material="cap_mat" density="0" friction="2.0 0.04 0.002"/>
-    </body>
-
-    <body name="bottle_2" pos="0.72 -0.35 0.728">
-      <freejoint name="bottle_2_free"/>
-      <inertial pos="0 0 0.075" mass="0.12" diaginertia="0.00035 0.00035 0.00012"/>
-      <geom name="bottle_2_body" type="cylinder" size="0.038 0.065" pos="0 0 0.065"
-            material="bottle_orange" density="0" friction="1.8 0.04 0.002"/>
-      <geom name="bottle_2_shoulder" type="capsule" size="0.032 0.020" pos="0 0 0.135"
-            material="bottle_orange" density="0"/>
-      <geom name="bottle_2_neck" type="cylinder" size="0.022 0.025" pos="0 0 0.165"
-            material="bottle_orange" density="0"/>
-      <geom name="bottle_2_cap" type="cylinder" size="0.024 0.010" pos="0 0 0.200"
-            material="cap_mat" density="0" friction="2.0 0.04 0.002"/>
+            class="bottle_contact" material="cap_mat" density="0"/>
     </body>
 
   </worldbody>
 
   <default>
     <geom friction="1.0"/>
+    <!--
+      Rubber-like bottle contact: a longer solref time constant and gentler
+      solimp curve add compliance, while condim=6 enables sliding, torsional,
+      and rolling friction for a more secure Dex3 grasp.
+    -->
+    <default class="bottle_contact">
+      <geom friction="2.5 0.08 0.005" condim="6"
+            solref="0.025 2.0" solimp="0.85 0.95 0.004 0.5 2"/>
+    </default>
   </default>
 </mujoco>

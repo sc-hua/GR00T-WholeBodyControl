@@ -352,6 +352,7 @@ def write_output_dataset(
         info["script_config"] = script_config
 
     total_frames = 0
+    total_videos = 0
     episodes_jsonl = []
 
     for i, ep in enumerate(all_episodes):
@@ -393,6 +394,7 @@ def write_output_dataset(
                     filter_video_frames(dst_video, ep["valid_indices"], fps)
                 else:
                     shutil.copy2(src_video, dst_video)
+                total_videos += 1
 
         ep_meta = {
             "episode_index": i,
@@ -405,6 +407,7 @@ def write_output_dataset(
 
     info["total_episodes"] = len(all_episodes)
     info["total_frames"] = total_frames
+    info["total_videos"] = total_videos
     info.pop("discarded_episode_indices", None)
 
     with open(meta_dir / "info.json", "w", encoding="utf-8") as f:
@@ -600,6 +603,13 @@ def main(cfg: ProcessDatasetConfig):
 
         ds_info["total_frames"] = sum(len(ep["df"]) for ep in all_episodes)
         ds_info["total_episodes"] = len(all_episodes)
+        ds_info["total_videos"] = sum(
+            vpath.exists()
+            for ep in all_episodes
+            for vpath in get_video_paths(
+                output_path, ds_info, ep["episode_meta"]["episode_index"]
+            ).values()
+        )
         if cfg.remove_discarded:
             ds_info.pop("discarded_episode_indices", None)
         with open(output_path / "meta" / "info.json", "w", encoding="utf-8") as f:

@@ -16,10 +16,12 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from fractions import Fraction
+import json
 import logging
 import socket
 import struct
 import threading
+import time
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -269,6 +271,119 @@ def make_multiview_stereo_frame(
     return np.concatenate((eye, eye), axis=1)
 
 
+def draw_recording_status(frame: Any, status: dict[str, Any]) -> Any:
+    """Draw the authoritative data-exporter state in the same place for both eyes."""
+
+    import cv2
+
+    if frame is None or frame.ndim != 3 or frame.shape[2] != 3 or frame.shape[1] % 2:
+        raise ValueError("stereo frame must have shape HxWx3 with an even width")
+
+    state = status.get("state", "offline")
+    elapsed = max(0.0, float(status.get("elapsed_seconds", 0.0)))
+    episode_index = int(status.get("episode_index", 0))
+    if state == "recording":
+        minutes, seconds = divmod(int(elapsed), 60)
+        label = f"REC  {minutes:02d}:{seconds:02d}  EP {episode_index}"
+        color = (30, 30, 235)
+    elif state == "need_to_save":
+        label = "SAVING EPISODE..."
+        color = (0, 165, 255)
+    elif state == "idle":
+        label = f"READY  EP {episode_index}"
+        color = (70, 170, 70)
+    else:
+        label = "RECORDER OFFLINE"
+        color = (90, 90, 90)
+
+    eye_width = frame.shape[1] // 2
+    font_scale = max(0.55, min(1.0, frame.shape[0] / 720.0))
+    thickness = max(1, round(font_scale * 2))
+    text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+    panel_width = min(eye_width - 16, text_size[0] + 58)
+    panel_height = max(42, text_size[1] + 22)
+    y0 = 12
+    for eye_index in range(2):
+        eye_x = eye_index * eye_width
+        x0 = eye_x + (eye_width - panel_width) // 2
+        overlay = frame.copy()
+        cv2.rectangle(
+            overlay,
+            (x0, y0),
+            (x0 + panel_width, y0 + panel_height),
+            (10, 10, 10),
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+        dot_visible = state != "recording" or int(elapsed * 2) % 2 == 0
+        if dot_visible:
+            cv2.circle(frame, (x0 + 20, y0 + panel_height // 2), 8, color, -1, cv2.LINE_AA)
+        cv2.putText(
+            frame,
+            label,
+            (x0 + 38, y0 + (panel_height + text_size[1]) // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(
+            frame,
+            (x0, y0),
+            (x0 + panel_width, y0 + panel_height),
+            color,
+            2,
+        )
+    return frame
+
+
+class RecordingStatusSource:
+    """Subscribe to the data exporter's recording-state heartbeat."""
+
+    TOPIC = "recording_status"
+
+    def __init__(self, host: str, port: int, stale_after_seconds: float = 2.0):
+        import zmq
+
+        self._zmq = zmq
+        self._stale_after_seconds = stale_after_seconds
+        self._last_received_at: float | None = None
+        self._status: dict[str, Any] = {"state": "offline"}
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.SUB)
+        self._socket.setsockopt_string(zmq.SUBSCRIBE, self.TOPIC)
+        self._socket.setsockopt(zmq.CONFLATE, True)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.connect(f"tcp://{host}:{port}")
+        LOGGER.info("Subscribed to recording status at tcp://%s:%d", host, port)
+
+    def receive(self) -> dict[str, Any]:
+        while self._socket.poll(0):
+            raw = self._socket.recv_string(flags=self._zmq.NOBLOCK)
+            topic, separator, payload = raw.partition(" ")
+            if topic != self.TOPIC or not separator:
+                continue
+            try:
+                status = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(status, dict):
+                self._status = status
+                self._last_received_at = time.monotonic()
+
+        if (
+            self._last_received_at is None
+            or time.monotonic() - self._last_received_at > self._stale_after_seconds
+        ):
+            return {"state": "offline"}
+        return self._status.copy()
+
+    def close(self) -> None:
+        self._socket.close()
+        self._context.term()
+
+
 class SonicZmqFrameSource:
     """Read the latest named JPEG/ndarray image from a SONIC ZMQ publisher."""
 
@@ -402,6 +517,8 @@ class XRoboToolkitVideoServer:
         camera_port: int = 5555,
         image_key: str = "ego_view",
         layout: str = "single",
+        recording_status_host: str = "localhost",
+        recording_status_port: int = 5560,
         encoder: str = "auto",
     ):
         if layout not in {"single", "dual_view", "dashboard"}:
@@ -412,6 +529,8 @@ class XRoboToolkitVideoServer:
         self.camera_port = camera_port
         self.image_key = image_key
         self.layout = layout
+        self.recording_status_host = recording_status_host
+        self.recording_status_port = recording_status_port
         self.encoder = encoder
         self._shutdown = threading.Event()
         self._stream_stop: threading.Event | None = None
@@ -498,6 +617,10 @@ class XRoboToolkitVideoServer:
 
     def _stream(self, request: CameraRequest, stream_stop: threading.Event) -> None:
         source = SonicZmqFrameSource(self.camera_host, self.camera_port, self.image_key)
+        recording_status = RecordingStatusSource(
+            self.recording_status_host,
+            self.recording_status_port,
+        )
         video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         video_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         video_socket.settimeout(10.0)
@@ -550,6 +673,7 @@ class XRoboToolkitVideoServer:
                     )
                     if stereo is None:
                         continue
+                draw_recording_status(stereo, recording_status.receive())
                 for payload in encoder.encode(stereo):
                     video_socket.sendall(frame_video_packet(payload))
                 frame_count += 1
@@ -559,5 +683,6 @@ class XRoboToolkitVideoServer:
             LOGGER.exception("XRoboToolkit video stream failed")
         finally:
             source.close()
+            recording_status.close()
             video_socket.close()
             LOGGER.info("XRoboToolkit video stream stopped")

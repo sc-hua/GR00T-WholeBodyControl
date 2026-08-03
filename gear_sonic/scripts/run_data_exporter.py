@@ -93,6 +93,9 @@ class SonicDataExporterConfig:
     state_zmq_port: int = 5557
     """ZMQ port for robot state (same socket as robot_config topic)."""
 
+    recording_status_port: int = 5560
+    """ZMQ PUB port for the XR recording-status heartbeat."""
+
     # Robot config
     robot_config_timeout: float = 0
     """Seconds to wait for the ZMQ robot_config message at startup (0 = wait forever)."""
@@ -227,6 +230,7 @@ class GrootDataCollector:
         sonic_data_zmq_port: int = 5556,
         state_zmq_host: str = "localhost",
         state_zmq_port: int = 5557,
+        recording_status_port: int = 5560,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
@@ -249,6 +253,26 @@ class GrootDataCollector:
 
         self._manager_toggle_dc = False
         self._manager_toggle_da = False
+        self._recording_started_at: float | None = None
+        self._last_recording_status_at = 0.0
+        self._last_recording_status_state: str | None = None
+
+        self._recording_status_context = None
+        self._recording_status_socket = None
+        try:
+            self._recording_status_context = zmq.Context()
+            self._recording_status_socket = self._recording_status_context.socket(zmq.PUB)
+            self._recording_status_socket.setsockopt(zmq.LINGER, 0)
+            self._recording_status_socket.bind(f"tcp://*:{recording_status_port}")
+            print(f"[Recording Status] Publishing on TCP {recording_status_port}")
+        except Exception as exc:
+            print(f"[Recording Status] Warning: Failed to start publisher: {exc}")
+            if self._recording_status_socket is not None:
+                self._recording_status_socket.close()
+            if self._recording_status_context is not None:
+                self._recording_status_context.term()
+            self._recording_status_socket = None
+            self._recording_status_context = None
 
         self._state_subscriber = ZMQStateSubscriber(
             host=state_zmq_host,
@@ -333,6 +357,45 @@ class GrootDataCollector:
                 self._episode_state.reset_state()
                 self._initial_yaw = None
                 self._print_and_say("Discarded episode", blocking=False)
+
+    def _publish_recording_status(self, force: bool = False) -> None:
+        if self._recording_status_socket is None:
+            return
+
+        now = time.monotonic()
+        state = self._episode_state.get_state()
+        state_changed = state != self._last_recording_status_state
+        if not force and not state_changed and now - self._last_recording_status_at < 0.2:
+            return
+
+        if state == self._episode_state.RECORDING:
+            if self._recording_started_at is None:
+                self._recording_started_at = now
+            elapsed_seconds = now - self._recording_started_at
+        elif state == self._episode_state.NEED_TO_SAVE:
+            elapsed_seconds = (
+                now - self._recording_started_at
+                if self._recording_started_at is not None
+                else 0.0
+            )
+        else:
+            elapsed_seconds = 0.0
+            self._recording_started_at = None
+
+        payload = {
+            "state": state,
+            "elapsed_seconds": elapsed_seconds,
+            "episode_index": self.current_episode_index,
+        }
+        try:
+            self._recording_status_socket.send_string(
+                "recording_status " + json.dumps(payload),
+                flags=zmq.NOBLOCK,
+            )
+            self._last_recording_status_at = now
+            self._last_recording_status_state = state
+        except zmq.Again:
+            pass
 
     def _poll_sonic_zmq_messages(self):
         """Poll ZMQ for pose, planner, and manager_state messages (non-blocking)."""
@@ -844,13 +907,13 @@ class GrootDataCollector:
             self._state_subscriber.close()
         except Exception:
             pass
-        for sock in [self._sonic_zmq_socket]:
+        for sock in [self._sonic_zmq_socket, self._recording_status_socket]:
             if sock is not None:
                 try:
                     sock.close()
                 except Exception:
                     pass
-        for ctx in [self._sonic_zmq_ctx]:
+        for ctx in [self._sonic_zmq_ctx, self._recording_status_context]:
             if ctx is not None:
                 try:
                     ctx.term()
@@ -880,6 +943,8 @@ class GrootDataCollector:
 
                     with self.telemetry.timer("check_recording_commands"):
                         self._check_recording_commands()
+
+                    self._publish_recording_status()
 
                     end_time = time.monotonic()
 
@@ -950,6 +1015,7 @@ def main(config: SonicDataExporterConfig):
         sonic_data_zmq_port=config.sonic_zmq_port,
         state_zmq_host=config.state_zmq_host,
         state_zmq_port=config.state_zmq_port,
+        recording_status_port=config.recording_status_port,
     )
     data_collector.run()
 

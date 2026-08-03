@@ -4,6 +4,7 @@ import numpy as np
 
 from gear_sonic.utils.teleop.xrobotoolkit_video_sender import (
     LengthPrefixedStream,
+    draw_recording_status,
     frame_video_packet,
     make_multiview_stereo_frame,
     make_stereo_frame,
@@ -119,3 +120,15 @@ def test_multiview_waits_until_main_camera_is_available():
         )
         is None
     )
+
+
+def test_recording_status_overlay_is_visible_and_identical_in_both_eyes():
+    stereo = np.zeros((144, 512, 3), dtype=np.uint8)
+
+    result = draw_recording_status(
+        stereo,
+        {"state": "recording", "elapsed_seconds": 65.0, "episode_index": 3},
+    )
+
+    np.testing.assert_array_equal(result[:, :256], result[:, 256:])
+    assert np.any(result[:, :256] != 0)

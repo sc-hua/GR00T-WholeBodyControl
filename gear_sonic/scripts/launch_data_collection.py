@@ -154,6 +154,9 @@ class DataCollectionLaunchConfig:
     data_exporter_frequency: int = 50
     """Data collection frequency (Hz) for the data exporter."""
 
+    recording_status_port: int = 5560
+    """Data exporter recording-status port used by the XR camera overlay."""
+
     record_wrist_cameras: bool = False
     """Record wrist camera streams (left_wrist, right_wrist) in the dataset."""
 
@@ -368,6 +371,7 @@ def main(config: DataCollectionLaunchConfig):
     if config.xr_camera_viewer:
         print(f"  XR image stream: {config.xr_camera_image_key}")
         print(f"  XR layout:       {config.xr_camera_layout}")
+        print(f"  REC status port: {config.recording_status_port}")
     print(f"  Wrist cameras:   {'Yes' if config.record_wrist_cameras else 'No'}")
     print(f"  Text-to-speech:  {'Yes' if config.text_to_speech else 'No'}")
     print(f"  PC IP (for PICO): {_get_local_ip()}")
@@ -462,7 +466,8 @@ def main(config: DataCollectionLaunchConfig):
                 f"--camera-host {config.camera_host} "
                 f"--camera-port {config.camera_port} "
                 f"--image-key {config.xr_camera_image_key} "
-                f"--layout {config.xr_camera_layout}"
+                f"--layout {config.xr_camera_layout} "
+                f"--recording-status-port {config.recording_status_port}"
             )
         else:
             camera_viz_dir = (
@@ -522,7 +527,8 @@ def main(config: DataCollectionLaunchConfig):
         f"--task-prompt '{config.task_prompt}' "
         f"--data-collection-frequency {config.data_exporter_frequency} "
         f"--camera-host {config.camera_host} "
-        f"--camera-port {config.camera_port}"
+        f"--camera-port {config.camera_port} "
+        f"--recording-status-port {config.recording_status_port}"
     )
     if config.dataset_name:
         exporter_cmd += f" --dataset-name '{config.dataset_name}'"

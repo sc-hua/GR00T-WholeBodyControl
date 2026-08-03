@@ -43,6 +43,8 @@ def main() -> None:
     parser.add_argument("--camera-host", default="localhost")
     parser.add_argument("--camera-port", type=int, default=5555)
     parser.add_argument("--image-key", default="ego_view")
+    parser.add_argument("--recording-status-host", default="localhost")
+    parser.add_argument("--recording-status-port", type=int, default=5560)
     parser.add_argument(
         "--layout",
         choices=("single", "dual_view", "dashboard"),
@@ -68,6 +70,8 @@ def main() -> None:
         camera_port=args.camera_port,
         image_key=args.image_key,
         layout=args.layout,
+        recording_status_host=args.recording_status_host,
+        recording_status_port=args.recording_status_port,
         encoder=args.encoder,
     )
     try:

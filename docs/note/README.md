@@ -1,6 +1,6 @@
 # 当前工作状态：PICO 全身遥操作、XR 视觉与瓶子投桶数据采集
 
-最后更新：2026-08-01（Asia/Shanghai）
+最后更新：2026-08-02（Asia/Shanghai）
 
 这是一份面向后续开发者和新对话的接手文档。开始继续工作前，请先阅读本页，再运行
 `git status --short` 核对工作区，因为文末记录的提交状态会随着后续开发变化。
@@ -10,7 +10,7 @@
 当前要搭建的是一套在 MuJoCo 中使用 PICO 遥操作 G1 43 DoF（含 Dex3 双手）采集全身任务数据的流程。
 当前任务是：
 
-> G1 找到附近随机桌上的 1 或 2 个瓶子，逐个拿起，走到旁边随机生成的垃圾桶并投入桶内。
+> G1 找到附近随机桌上的 1 个瓶子，将它拿起，走到旁边随机生成的垃圾桶并投入桶内。
 
 相较此前的双手搬箱任务，瓶子更轻、更容易单手抓握；任务仍包含寻找目标、上肢抓取、行走、
 转身和投放等全身动作。当前场景不会自动判断任务成功，是否完成仍由操作者决定。
@@ -99,6 +99,7 @@ PICO Listen
 | `5555` | MuJoCo/相机服务 -> 工作站进程 | SONIC JPEG/ndarray 相机 ZMQ 数据 |
 | `13579` | PICO -> 工作站 | XRoboToolkit `OPEN_CAMERA`/`CLOSE_CAMERA` 控制连接 |
 | `12345` | 工作站 -> PICO | H.264 视频回传到 PICO MediaDecoder |
+| `5560` | data exporter -> XR sender | 录制状态和计时心跳 |
 
 在 PICO 的 `Remote Vision` 中：
 
@@ -137,7 +138,15 @@ TCP Client disconnected from server
 - 选中的单目画面会复制到左右眼，属于单目 side-by-side，不是真正的双目深度画面。
 - 当前发送 H.264；如果 PICO 请求 HEVC，桥接器会给出 warning，但仍按 H.264 实现工作。
 - 编码器 `auto` 会先尝试 `h264_nvenc`，失败后回退 `libx264`。
-- 协议与画面布局单测已覆盖单画面、双画面和 dashboard。
+- data exporter 会在 TCP `5560` 以 5 Hz 发布权威录制状态，XR sender 将状态叠加到每只眼睛的
+  画面顶部中央：
+  - 绿色 `READY EP n`：exporter 在线，尚未录制；
+  - 红色闪烁 `REC mm:ss EP n`：正在录制，并显示本 episode 已录时长；
+  - 橙色 `SAVING EPISODE...`：录制已停止，正在落盘；
+  - 灰色 `RECORDER OFFLINE`：exporter 未启动、已退出，或超过 2 秒没有心跳。
+- 该视觉提示不依赖语音，因此使用 `--no-text-to-speech` 时仍然有效；状态来自 exporter，
+  不是简单跟随手柄按键，所以 exporter 启动失败时不会误显示 `REC`。
+- 协议与画面布局单测已覆盖单画面、双画面、dashboard 和录制状态叠加。
 - 尚未在文档记录一次“PICO 真机已经稳定看到画面”的最终验收结果；继续工作时应优先完成这项端到端确认。
 
 单独启动视频桥接器的命令：
@@ -190,9 +199,12 @@ gear_sonic/utils/mujoco_sim/scenes/scene_43dof_bottle_to_bin.xml
 
 - G1 43 DoF + Dex3 双手。
 - 一张 `0.72 m` 高、桌面约 `0.68 x 0.56 m` 的木色桌子 `bottle_table`。
-- 1 或 2 个轻量瓶子：蓝色 `bottle_1` 始终存在，橙色 `bottle_2` 在每次 Backspace 时以
-  `50%` 概率出现；每个约高 `0.21 m`、主体直径
-  `0.076 m`、质量 `0.12 kg`，使用 cylinder/capsule primitive 构成，适合 Dex3 单手抓握。
+- 1 个蓝色轻量瓶子 `bottle_1`，约高 `0.21 m`、主体直径 `0.076 m`、质量 `0.12 kg`，
+  使用 cylinder/capsule primitive 构成，适合 Dex3 单手抓握。
+- 瓶子的全部碰撞面使用 `bottle_contact` 默认类模拟橡胶接触：
+  `friction="2.5 0.08 0.005"`、`condim="6"`、`solref="0.025 2.0"`、
+  `solimp="0.85 0.95 0.004 0.5 2"`。这不会让视觉 mesh 真正变形，但会提供更柔和的接触、
+  更高的滑动摩擦，并启用扭转和滚动摩擦，降低从 Dex3 指间滑出的概率。
 - 一个开放式方形垃圾桶 `trash_bin`，内部开口约 `0.40 x 0.40 m`、桶口高度约 `0.64 m`；
   桶底和四壁都有碰撞，瓶子可以真实落入并留在桶内。
 - 垃圾桶使用绿色高亮桶沿，方便在头显和第三人称画面中快速识别投放目标。
@@ -202,10 +214,9 @@ gear_sonic/utils/mujoco_sim/scenes/scene_43dof_bottle_to_bin.xml
 
 该场景已经验证：
 
-- MuJoCo 可以成功加载，模型规模为 `nq=64, nv=61, nu=43`，初始状态无穿插接触。
-- 初始 `head_camera` 能清楚看到两只瓶子，`third_person_camera` 能同时看到机器人、桌子和垃圾桶。
-- XML 固定初始状态有 2 个瓶子；第一次按 Backspace 后才开始随机为 1 或 2 个。
-- 随机布局物理稳定性测试中，所有激活瓶子均稳定留在桌面，没有滑落。
+- MuJoCo 可以成功加载，模型规模为 `nq=57, nv=55, nu=43`，初始状态无穿插接触。
+- 初始 `head_camera` 能清楚看到瓶子，`third_person_camera` 能同时看到机器人、桌子和垃圾桶。
+- 随机布局物理稳定性测试中，瓶子稳定留在桌面，没有滑落。
 - 垃圾桶是开放碰撞结构，不是一个会挡住瓶子的实心 cylinder。
 - 30 次从随机桶口内部上方释放瓶子的试验全部成功，瓶子最终都停留在桶内。
 
@@ -232,8 +243,7 @@ gear_sonic/utils/mujoco_sim/base_sim.py
 - 最后调用 `mj_forward()` 更新运动学和接触数据。
 - 如果一个场景没有声明 `random_spawn_*`，Backspace 就保持原来的固定复位行为。
 
-当前瓶子投桶场景先随机垃圾桶和桌子，再将两个候选瓶子放到桌面可达区域，最后以 50% 概率
-隐藏第二个瓶子：
+当前瓶子投桶场景先随机垃圾桶和桌子，再将唯一的瓶子放到桌面可达区域：
 
 ```xml
 <numeric name="random_spawn_annulus_body_trash_bin"
@@ -243,7 +253,6 @@ gear_sonic/utils/mujoco_sim/base_sim.py
 <numeric name="spawn_distance_body_bottle_table_trash_bin" data="0.85 1.20"/>
 <numeric name="random_spawn_on_body_bottle_1_free__bottle_table"
          data="-0.25 0.25 -0.19 0.19 0.728 -3.141593 3.141593"/>
-<numeric name="random_presence_bottle_2_free" data="0.5 0 0 -2"/>
 ```
 
 环形配置的七个数字依次表示：
@@ -259,9 +268,7 @@ center_x center_y radius_min radius_max z yaw_min yaw_max
 - 垃圾桶到机器人中心：`0.90 ~ 1.15 m`。
 - 桌子与垃圾桶中心距离：强制为 `0.85 ~ 1.20 m`，形成需要短距离行走但不会太远的任务。
 - 每个瓶子相对桌面中心的局部范围：x=`-0.25~0.25 m`、y=`-0.19~0.19 m`。
-- 任意两瓶中心距离至少 `0.13 m`，给手指留下抓取空间。
-- `random_presence_bottle_2_free` 的第一个数值是出现概率；未出现时把第二个瓶子移到场景下方
-  `(0, 0, -2)`，不会进入相机画面或参与桌面任务。
+- 瓶子始终只有一个，但每次 Backspace 都会重新采样它在桌面的局部 x/y 和 yaw。
 
 桌子或垃圾桶若与机器人、彼此或其他外部物体接触，会拒绝该次采样并重试；瓶子允许接触支撑桌，
 但与其他瓶子或外部物体接触时也会重采样。桌子和垃圾桶可能生成在机器人身后，操作者仍可能需要
@@ -276,13 +283,14 @@ center_x center_y radius_min radius_max z yaw_min yaw_max
 
 验证结果：
 
-- 连续联合随机抽样 5000 次，没有采样失败。
+- 单瓶版本连续联合随机抽样 3000 次，没有采样失败。
 - 桌子半径实测 `0.6500~0.8499 m`，垃圾桶半径实测 `0.9000~1.1500 m`。
-- 桌桶中心距离实测 `0.8502~1.1999 m`。
-- 任意两瓶最小中心距离实测 `0.1300 m`。
-- 另一次固定种子的 2000 次复位中，1 瓶出现 977 次、2 瓶出现 1023 次。
+- 桌桶中心距离实测 `0.8500~1.2000 m`。
+- 瓶子相对桌面的局部位置实测：x=`-0.2499~0.2500 m`、y=`-0.1899~0.1899 m`。
 - 20 组随机布局各步进 1000 次，瓶子掉落失败数为 0。
 - 30 次随机桶位投放测试中，瓶子落入并留在桶内的失败数为 0。
+- 橡胶接触参数又以 30 组随机布局各步进 1500 次验证：位置失败数为 0，最大残余速度为
+  `0.014941`；20 次随机桶位投放失败数为 0。
 - 初始第一人称和第三人称相机均可正常离屏渲染。
 - 普通 `reset()` 仍能返回 XML 固定位置。
 
@@ -297,7 +305,7 @@ center_x center_y radius_min radius_max z yaw_min yaw_max
 python gear_sonic/scripts/launch_data_collection.py \
   --sim \
   --sim-robot-scene gear_sonic/utils/mujoco_sim/scenes/scene_43dof_bottle_to_bin.xml \
-  --task-prompt "pick up every bottle from the table and put it into the trash bin" \
+  --task-prompt "pick up the bottle from the table and put it into the trash bin" \
   --dataset-name pico_bottle_to_bin \
   --pico-vis-vr3pt \
   --pico-vis-smpl \
@@ -339,10 +347,12 @@ python gear_sonic/scripts/launch_data_collection.py \
 4. 如果使用 PICO Remote Vision，在 PICO 选择 `ZEDMINI`，点 `Listen`，填写工作站 IP。
 5. 确认 MuJoCo viewer、PICO 人体映射和相机画面都正常。
 6. `Left Grip + A`：开始录制一个 episode。
-7. 逐个拿起桌上当前出现的 1 或 2 个瓶子，走到垃圾桶旁并将瓶子投入桶内。
+   PICO 画面应立即从绿色 `READY` 变为红色闪烁 `REC` 并开始计时；如果仍显示
+   `RECORDER OFFLINE`，不要开始动作，应先检查 data exporter pane。
+7. 拿起桌上的唯一瓶子，走到垃圾桶旁并将它投入桶内。
 8. 再按一次 `Left Grip + A`：停止并保存。
 9. 等 data exporter 明确输出 `Finished saving episode`。
-10. 点击 MuJoCo viewer，按一次 `Backspace`，同时随机桌子、垃圾桶、瓶子数量和位置。
+10. 点击 MuJoCo viewer，按一次 `Backspace`，同时随机桌子、垃圾桶和瓶子位置。
 11. 等瓶子和机器人稳定后，再按 `Left Grip + A` 开始下一条。
 
 失败 episode 的处理：
@@ -397,6 +407,18 @@ ss -ltnp | grep 13579
 ss -ltnp | grep 5555
 ```
 
+### PICO 画面显示 RECORDER OFFLINE
+
+这表示 XR 视频本身正常，但 data exporter 没有通过 TCP `5560` 发布心跳。检查：
+
+```bash
+ss -ltnp | grep 5560
+tmux capture-pane -p -S -100 -t sonic_data_collection:data_collection.2
+```
+
+常见原因包括 exporter pane 已退出、数据集目录是不完整的旧目录、5560 被其他进程占用，或手动启动
+sender/exporter 时两边使用了不同的 `--recording-status-port`。
+
 ### Backspace 后桌子、垃圾桶或瓶子没有随机
 
 依次检查：
@@ -405,8 +427,8 @@ ss -ltnp | grep 5555
 2. MuJoCo viewer 是否获得键盘焦点。
 3. 当前加载的是否确实是 `scene_43dof_bottle_to_bin.xml`。
 4. XML 是否仍包含 `random_spawn_annulus_body_bottle_table`、
-   `random_spawn_annulus_body_trash_bin`、两个 `random_spawn_on_body_bottle_*` 配置和
-   `random_presence_bottle_2_free`。
+   `random_spawn_annulus_body_trash_bin` 和
+   `random_spawn_on_body_bottle_1_free__bottle_table`。
 5. 仿真终端是否输出 `Randomized 'bottle_1_free' reset pose: ...` 等日志。
 
 ### Backspace 后随机范围不合适
@@ -421,7 +443,65 @@ ss -ltnp | grep 5555
 代码支持配置项 `RESET_RANDOM_SEED`，但当前 `run_sim_loop.py`/launcher 还没有暴露对应 CLI 参数。
 如有复现实验需求，下一步应把该配置正式接入 `SimLoopConfig` 和启动参数。
 
-## 7. 当前未完成与建议下一步
+## 7. 已采集数据与首次 VLA 训练准备
+
+2026-08-02 对四批瓶子投桶数据做了只读检查，并生成了一个非破坏性的合并训练集。原始目录均未修改：
+
+```text
+outputs/pico_bottle_to_bin_20260801_155748  12 episodes / 36773 frames
+outputs/pico_bottle_to_bin_20260801_164827   4 episodes /  2567 frames
+outputs/pico_bottle_to_bin_20260801_173110   8 episodes / 15677 frames
+outputs/pico_bottle_to_bin_20260801_181151  15 episodes / 31712 frames
+```
+
+四批合计 39 个 episode，其中 14 个已在采集时通过丢弃操作写入
+`discarded_episode_indices`。使用下面的命令合并时保留了 25 个有效 episode、64262 帧，约
+21.4 分钟：
+
+```bash
+source .venv_data_collection/bin/activate
+python gear_sonic/scripts/process_dataset.py \
+  --dataset-path \
+    outputs/pico_bottle_to_bin_20260801_155748 \
+    outputs/pico_bottle_to_bin_20260801_164827 \
+    outputs/pico_bottle_to_bin_20260801_173110 \
+    outputs/pico_bottle_to_bin_20260801_181151 \
+  --output-path outputs/pico_bottle_to_bin_merged_20260802 \
+  --no-remove-stale-smpl
+```
+
+这里必须使用 `--no-remove-stale-smpl`：当前 VLA 训练动作是 `motion_token + 双手关节`，而
+`PLANNER` 行走阶段的 `smpl_pose` 本来就可能为零。按 SMPL 零值清理会错误删除重要的行走帧。
+
+合并集已经验证：
+
+- 25 个 parquet、25 个 H.264 MP4 和 25 条 episode metadata 一一对应；每个视频帧数与 parquet
+  行数一致。
+- state、64 维 motion token 和双手动作均没有 NaN/Inf，视频为 `640x480@50fps`，抽样画面不是
+  全灰或全黑。
+- 四批数据的 features、`modality.json` 和 `script_config` 完全一致。
+- 已用 Isaac-GR00T N1.7 的 `UNITREE_G1_SONIC` 配置生成 `meta/stats.json` 和
+  `meta/relative_stats.json`，并成功通过官方 `LeRobotEpisodeLoader` 加载低维状态、动作和语言。
+- `process_dataset.py` 已修复合并后 `total_videos` 沿用首个数据集旧值的问题；合并集现在正确记录为
+  25。
+
+当前合并集的统一训练提示词来自第一批数据：
+
+```text
+pick up every bottle from the table and put it into the trash bin
+```
+
+它对单瓶场景语义仍成立。部署时最好使用相同提示词，后续继续采集则建议统一改成单数版本，避免同一
+任务出现不必要的语言差异。
+
+训练应在相邻仓库 `/data/pateo/proj/robot/Isaac-GR00T` 中使用 GR00T N1.7 和
+`UNITREE_G1_SONIC`。当前工作站只有一张 16GB RTX A4000；官方建议微调使用 40GB 以上显存，且
+当前 Isaac-GR00T 尚未创建 `.venv`、系统没有 `ffmpeg` 命令、Hugging Face 也没有可用登录 token，
+N1.7 模型目录只有未下载权重的引用。因此这里暂时不能可靠启动正式微调。具备 40GB 以上 GPU、完成
+环境安装和 gated 模型授权后，推荐以 batch size 32、20k steps 为第一次正式实验；当前只有 25 条
+有效示范，适合先验证训练链路，但显著少于官方单任务示例约 150 条数据，策略成功率预期有限。
+
+## 8. 当前未完成与建议下一步
 
 按优先级排列：
 
@@ -439,7 +519,7 @@ ss -ltnp | grep 5555
 8. 当前已经支持机器人周围 360° 环形采样、物体距离约束和接触拒绝。后续如果扩大到更远的地面范围，
    还应加入路径可达性和相机可见性检查，可能也要让机器人初始朝向共同随机化。
 
-## 8. 新对话接手提示
+## 9. 新对话接手提示
 
 可以在新对话中直接发送：
 
