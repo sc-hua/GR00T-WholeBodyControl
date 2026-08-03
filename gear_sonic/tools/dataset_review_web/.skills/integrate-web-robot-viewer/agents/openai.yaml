@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integrate Web Robot Viewer"
+  short_description: "Build robust interactive web robot viewer UIs"
+  default_prompt: "Use $integrate-web-robot-viewer to design and implement a robust interactive robot viewer for this web application."
