@@ -91,6 +91,9 @@ class InferenceLaunchConfig:
     sim: bool = False
     """Run against MuJoCo sim instead of real robot."""
 
+    sim_robot_scene: str = ""
+    """Optional repo-relative MJCF scene path used by the MuJoCo sim."""
+
     # C++ deploy options
     deploy_input_type: str = "zmq_manager"
     """Input type for the C++ deploy."""
@@ -188,6 +191,15 @@ def _check_prerequisites(config: InferenceLaunchConfig):
         errors.append(
             ".venv_sim not found. Set up the simulation venv first."
         )
+
+    if config.sim_robot_scene:
+        if not config.sim:
+            errors.append("--sim-robot-scene requires --sim")
+        scene_path = Path(config.sim_robot_scene)
+        if not scene_path.is_absolute():
+            scene_path = repo_root / scene_path
+        if not scene_path.is_file():
+            errors.append(f"MuJoCo scene not found: {scene_path}")
 
     if errors:
         print("ERROR: Prerequisites not met:\n")
@@ -291,6 +303,8 @@ def main(config: InferenceLaunchConfig):
             f"--enable-image-publish --enable-offscreen "
             f"--camera-port {config.camera_port}"
         )
+        if config.sim_robot_scene:
+            sim_cmd += f" --robot-scene {config.sim_robot_scene}"
         sim_target = f"{SESSION_NAME}:sim"
         subprocess.run(
             ["tmux", "send-keys", "-t", sim_target, sim_cmd, "C-m"],

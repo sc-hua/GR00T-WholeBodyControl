@@ -1,6 +1,6 @@
 # 当前工作状态：PICO 全身遥操作、XR 视觉与瓶子投桶数据采集
 
-最后更新：2026-08-02（Asia/Shanghai）
+最后更新：2026-08-04（Asia/Shanghai）
 
 这是一份面向后续开发者和新对话的接手文档。开始继续工作前，请先阅读本页，再运行
 `git status --short` 核对工作区，因为文末记录的提交状态会随着后续开发变化。
@@ -535,12 +535,104 @@ python gear_sonic/scripts/process_dataset.py \
 原始 mesh，但当前 `observation.state` 只包含 43 个关节角，没有 floating-base 的世界位置和朝向，
 因此网页中 pelvis 固定在展示原点；它仍不是完整的 MuJoCo 物理状态回放。
 
-训练应在相邻仓库 `/data/pateo/proj/robot/Isaac-GR00T` 中使用 GR00T N1.7 和
-`UNITREE_G1_SONIC`。当前工作站只有一张 16GB RTX A4000；官方建议微调使用 40GB 以上显存，且
-当前 Isaac-GR00T 尚未创建 `.venv`、系统没有 `ffmpeg` 命令、Hugging Face 也没有可用登录 token，
-N1.7 模型目录只有未下载权重的引用。因此这里暂时不能可靠启动正式微调。具备 40GB 以上 GPU、完成
-环境安装和 gated 模型授权后，推荐以 batch size 32、20k steps 为第一次正式实验；当前只有 25 条
-有效示范，适合先验证训练链路，但显著少于官方单任务示例约 150 条数据，策略成功率预期有限。
+训练在云端的相邻仓库 Isaac-GR00T 中使用 GR00T N1.7 和
+`UNITREE_G1_SONIC` 完成。训练使用的审核后数据目录为
+`./data/pico_bottle_to_bin_reviewed`；权重已拉取到：
+
+```text
+/data/pateo/proj/robot/Isaac-GR00T/outputs/pico_bottle_to_bin-1
+```
+
+当前本地已用该权重启动 PolicyServer：
+
+```bash
+cd /data/pateo/proj/robot/Isaac-GR00T
+uv run python gr00t/eval/run_gr00t_server.py \
+  --model-path ./outputs/pico_bottle_to_bin-1 \
+  --embodiment-tag UNITREE_G1_SONIC \
+  --device cuda:0 \
+  --port 5550
+```
+
+2026-08-04 已确认 `0.0.0.0:5550` 监听正常，PolicyClient `ping=True`；模型动作
+horizon 为 40，与 SONIC 推理客户端默认值一致。当前工作站为单张 16GB RTX A4000，
+PolicyServer 加载后约占 6.3GB 显存；微调仍应在 40GB 以上显存的云端 GPU 进行。
+
+### 7.2 本地 VLA 推理环境安装故障与解决方案
+
+2026-08-04 首次运行下面的标准安装命令失败：
+
+```bash
+bash install_scripts/install_inference.sh
+```
+
+故障不是网络或 CUDA 问题，而是 WholeBodyControl 的旧安装声明与当前
+Isaac-GR00T 上游打包方式不再匹配。实际遇到了三层问题：
+
+1. `gear_sonic/pyproject.toml` 原先把依赖名写成
+   `Isaac-GR00T @ git+https://github.com/NVIDIA/Isaac-GR00T.git`，但当前上游
+   `pyproject.toml` 的真实项目名是 `gr00t`。`uv` 因此报错：
+
+   ```text
+   Package metadata name `gr00t` does not match given name `isaac-gr00t`
+   ```
+
+2. 只把依赖名改为 `gr00t @ git+...` 仍不够。当前 Isaac-GR00T 对 ARM64 的
+   `torchcodec` 使用了仓库内本地 wheel 引用。Isaac-GR00T 作为传递 Git 依赖时，
+   `uv 0.10.12` 会在解析阶段直接拒绝该本地文件源，即使当前机器是 x86_64：
+
+   ```text
+   Git repository references local file source, but only directories are
+   supported as transitive Git dependencies: ...torchcodec...linux_aarch64.whl
+   ```
+
+3. 旧 `install_inference.sh` 固定创建 Python 3.10 环境，而当前 Isaac-GR00T
+   明确要求 Python `>=3.12,<3.13`。因此即使绕过前两个问题，Python 3.10 也无法完成安装。
+
+最终修复如下：
+
+- `install_inference.sh` 改用独立的 Python 3.12 `.venv_inference`；不修改仍在使用
+  Python 3.10 的 teleop、MuJoCo 和 data-collection 环境。
+- `gear_sonic` 的依赖名改为正确的 `gr00t`。
+- 不再让 Isaac-GR00T 作为 Git 传递依赖解析，而是把已有的本地仓库
+  `/data/pateo/proj/robot/Isaac-GR00T` 作为顶层 editable 项目安装。
+- 安装脚本默认查找 `$REPO_ROOT/../Isaac-GR00T`；如果仓库在其他位置，使用
+  `ISAAC_GROOT_PATH=/path/to/Isaac-GR00T bash install_scripts/install_inference.sh`。
+- 为了仍在 `gear_sonic/pyproject.toml` 中保留可追溯的 Git 源，脚本通过
+  `uv pip install --overrides` 把 `gr00t` 绝对覆盖为本地 `file://` URI，并把
+  Isaac-GR00T 和 `gear_sonic[inference]` 同时作为顶层 editable 项目安装。
+
+修复后安装解析了 155 个包。上游基础依赖会下载约 4.1GiB 的
+`tensorrt-cu12-libs`，这是正常现象。如果 `uv` 缓存和项目不在同一文件系统，还会看到
+`Failed to hardlink files; falling back to full copy`；它只表示需要复制文件，不是安装失败。
+本次首次冷启动导入 `gr00t.policy` 时由于加载 Torch/Transformers 和大量共享库，在慢磁盘上
+超过 120 秒；文件缓存预热后再次导入仅需约 2.1 秒，不应将首次长时间无输出误判为卡死。
+
+最终验证结果：
+
+```text
+Python: 3.12.13
+gr00t source: /data/pateo/proj/robot/Isaac-GR00T/gr00t
+pinocchio import: OK
+PolicyClient import: OK
+PolicyServer ping: True
+modality keys: action, language, state, video
+```
+
+环境修复后无需重启 PolicyServer。本地仿真推理启动器也已新增
+`--sim-robot-scene`，并检查它必须与 `--sim` 同时使用且场景文件存在。当前推荐命令为：
+
+```bash
+python gear_sonic/scripts/launch_inference.py \
+  --sim \
+  --sim-robot-scene gear_sonic/utils/mujoco_sim/scenes/scene_43dof_bottle_to_bin.xml \
+  --policy-host localhost \
+  --policy-port 5550 \
+  --embodiment-tag unitree_g1_sonic \
+  --prompt "pick up every bottle from the table and put it into the trash bin" \
+  --action-horizon 40 \
+  --no-data-exporter
+```
 
 ## 8. 当前未完成与建议下一步
 

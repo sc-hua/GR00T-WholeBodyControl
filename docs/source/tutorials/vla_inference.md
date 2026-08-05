@@ -62,8 +62,10 @@ On the inference machine (can be the same as the PolicyServer or a separate PC):
 bash install_scripts/install_inference.sh
 ```
 
-This creates `.venv_inference` with the Isaac-GR00T PolicyClient and all
-inference dependencies.
+This creates a Python 3.12 `.venv_inference` with the Isaac-GR00T PolicyClient
+and all inference dependencies. The installer uses an Isaac-GR00T checkout next
+to this repository by default. Set `ISAAC_GROOT_PATH=/path/to/Isaac-GR00T` when
+the checkout is elsewhere.
 
 ### 3. Camera Server
 
@@ -136,6 +138,11 @@ python gear_sonic/scripts/launch_inference.py \
 # Simulation
 python gear_sonic/scripts/launch_inference.py --sim \
     --prompt "pick up the apple"
+
+# Simulation with a custom MuJoCo scene
+python gear_sonic/scripts/launch_inference.py --sim \
+    --sim-robot-scene gear_sonic/utils/mujoco_sim/scenes/scene_43dof_bottle_to_bin.xml \
+    --prompt "pick up every bottle from the table and put it into the trash bin"
 
 # Without data recording
 python gear_sonic/scripts/launch_inference.py \
@@ -252,6 +259,7 @@ python gear_sonic/scripts/run_data_exporter.py \
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--sim-robot-scene` | `""` | Repo-relative or absolute MJCF scene path used with `--sim` |
 | `--host` | `localhost` | PolicyServer host |
 | `--port` | `5550` | PolicyServer port |
 | `--embodiment-tag` | `unitree_g1_sonic` | Embodiment tag |
