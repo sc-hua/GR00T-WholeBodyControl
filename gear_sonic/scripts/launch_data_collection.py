@@ -391,7 +391,8 @@ def main(config: DataCollectionLaunchConfig):
             f"source .venv_sim/bin/activate && "
             f"python gear_sonic/scripts/run_sim_loop.py "
             f"--enable-image-publish --enable-offscreen "
-            f"--camera-port {config.camera_port}"
+            f"--camera-port {config.camera_port} "
+            f"--enable-pico-scene-reset"
         )
         if config.sim_robot_scene:
             sim_cmd += f" --robot-scene {config.sim_robot_scene}"

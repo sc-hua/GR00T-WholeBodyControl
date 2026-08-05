@@ -35,8 +35,6 @@ from scipy.spatial.transform import Rotation as R, Rotation as sRot
 import torch
 import zmq
 
-from gear_sonic.utils.teleop import input_readers
-from gear_sonic.utils.teleop.zmq.zmq_poller import ZMQPoller
 from gear_sonic.trl.utils.rotation_conversion import decompose_rotation_aa
 from gear_sonic.trl.utils.torch_transform import (
     angle_axis_to_quaternion,
@@ -46,6 +44,9 @@ from gear_sonic.trl.utils.torch_transform import (
     quaternion_to_angle_axis,
     quaternion_to_rotation_matrix,
 )
+from gear_sonic.utils.teleop import input_readers
+from gear_sonic.utils.teleop.button_events import LongPressTrigger
+from gear_sonic.utils.teleop.zmq.zmq_poller import ZMQPoller
 
 try:
     from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
@@ -1918,6 +1919,7 @@ def run_pico_manager(
     Controller input:
       A+X: Toggle between planner and pose mode
       A+B+X+Y: Toggle policy start/stop
+      Hold right stick click for 1 second: randomize the MuJoCo scene
     """
     reader = _init_input_source(input_source, buffer_size)
 
@@ -1978,13 +1980,18 @@ def run_pico_manager(
     #   Emergency stop from any mode: A+B+X+Y (start_combo) --> OFF
     #   POSE_PAUSE: left_menu_button held --> POSE_PAUSE, released --> POSE
     #
-    print("Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy")
+    print(
+        "Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy, "
+        "hold right stick click=reset/randomize sim scene"
+    )
     current_mode = StreamMode.OFF
     # Track which mode VR_3PT was entered from, so left_axis_click returns to it.
     # Will be either PLANNER or PLANNER_FROZEN_UPPER_BODY.
     vr3pt_parent_mode = StreamMode.PLANNER
     prev_toggle_dc = False
     prev_toggle_da = False
+    scene_reset_trigger = LongPressTrigger(hold_seconds=1.0)
+    scene_reset_request_id = 0
     try:
         prev_ax_pressed = False
         prev_by_pressed = False
@@ -1996,7 +2003,13 @@ def run_pico_manager(
 
             left_menu_button, _, _, left_grip_mgr, _ = get_controller_inputs(reader)
 
-            left_axis_click, _ = get_axis_clicks(reader)
+            left_axis_click, right_axis_click = get_axis_clicks(reader)
+            if scene_reset_trigger.update(right_axis_click):
+                scene_reset_request_id += 1
+                print(
+                    "[Manager] MuJoCo scene reset/randomization requested "
+                    f"(request {scene_reset_request_id})"
+                )
 
             # Rising edge: A+X pressed together -> toggle POSE/PLANNER mode
             ax_pressed = (a_pressed) and (x_pressed)
@@ -2136,6 +2149,9 @@ def run_pico_manager(
                         "stream_mode": np.array([current_mode.value], dtype=np.int32),
                         "toggle_data_collection": np.array([toggle_dc], dtype=bool),
                         "toggle_data_abort": np.array([toggle_da], dtype=bool),
+                        "scene_reset_request_id": np.array(
+                            [scene_reset_request_id], dtype=np.int64
+                        ),
                     },
                     topic="manager_state",
                 )

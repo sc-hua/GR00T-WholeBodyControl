@@ -89,6 +89,9 @@ def override_wbc_config(
         "waist_pitch_limit": config.waist_pitch_limit,
         "hand_torque_limit": config.hand_torque_limit,
         "enable_natural_walk": config.enable_natural_walk,
+        "ENABLE_PICO_SCENE_RESET": getattr(config, "enable_pico_scene_reset", False),
+        "PICO_SCENE_RESET_HOST": getattr(config, "pico_scene_reset_host", "localhost"),
+        "PICO_SCENE_RESET_PORT": getattr(config, "pico_scene_reset_port", 5556),
     }
 
     if missed_keys_only:
@@ -347,6 +350,15 @@ class SimLoopConfig(BaseConfig):
 
     camera_port: int = 5555
     """Camera port for image publishing"""
+
+    enable_pico_scene_reset: bool = False
+    """Listen for PICO right-stick scene-randomization requests."""
+
+    pico_scene_reset_host: str = "localhost"
+    """Host running pico_manager_thread_server.py."""
+
+    pico_scene_reset_port: int = 5556
+    """PICO manager ZMQ port carrying scene-reset requests."""
 
     verbose: bool = False
     """Verbose output, override the base config verbose"""

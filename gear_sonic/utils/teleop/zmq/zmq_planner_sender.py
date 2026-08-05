@@ -222,3 +222,48 @@ def pack_pose_message(pose_data: dict, topic: str = "pose", version: int = 3) ->
 
     packed_message = topic_bytes + header_bytes + data_bytes
     return packed_message
+
+
+def unpack_pose_message(packed_data: bytes, topic: str = "pose") -> dict:
+    """Unpack a message produced by :func:`pack_pose_message`."""
+    topic_bytes = topic.encode("utf-8")
+    if not packed_data.startswith(topic_bytes):
+        raise ValueError(f"Message does not start with expected topic '{topic}'")
+
+    payload_offset = len(topic_bytes) + HEADER_SIZE
+    if len(packed_data) < payload_offset:
+        raise ValueError(
+            f"Packed data too small: {len(packed_data)} < {payload_offset}"
+        )
+
+    header_bytes = packed_data[len(topic_bytes) : payload_offset]
+    header_bytes = header_bytes.split(b"\x00", 1)[0]
+    header = json.loads(header_bytes.decode("utf-8"))
+    dtype_map = {
+        "f32": np.dtype("<f4"),
+        "f64": np.dtype("<f8"),
+        "i32": np.dtype("<i4"),
+        "i64": np.dtype("<i8"),
+        "bool": np.dtype(bool),
+        "u8": np.dtype(np.uint8),
+    }
+
+    result = {"version": header.get("v", 0), "endian": header.get("endian", "le")}
+    current_offset = payload_offset
+    for field in header.get("fields", []):
+        dtype = dtype_map.get(field["dtype"])
+        if dtype is None:
+            raise ValueError(f"Unsupported field dtype: {field['dtype']}")
+        shape = tuple(field["shape"])
+        field_size = int(np.prod(shape)) * dtype.itemsize
+        field_end = current_offset + field_size
+        if field_end > len(packed_data):
+            raise ValueError(f"Truncated payload for field '{field['name']}'")
+        result[field["name"]] = (
+            np.frombuffer(packed_data[current_offset:field_end], dtype=dtype)
+            .reshape(shape)
+            .copy()
+        )
+        current_offset = field_end
+
+    return result

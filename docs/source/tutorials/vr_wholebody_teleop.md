@@ -255,6 +255,7 @@ Below is the **recovery procedure** — if you accidentally enter a badly calibr
 | **Start / Stop policy** | **A+B+X+Y** | First press: engage + CALIB_FULL. Again: emergency stop → OFF. |
 | **Toggle POSE** | **A+X** | Switches between PLANNER ↔ POSE. OR from VR_3PT (entered via PLANNER) → POSE. |
 | **Toggle PLANNER_FROZEN_UPPER** | **B+Y** | Switches between POSE ↔ PLANNER_FROZEN_UPPER. OR from VR_3PT (entered via PLANNER_FROZEN_UPPER) → POSE. |
+| **Randomize MuJoCo scene** | **Hold right stick click for 1 second** | Simulation only. Performs the same randomized reset as Backspace in the MuJoCo viewer. |
 | **Toggle VR_3PT** | **Left Stick Click** | From any Planner mode → VR_3PT (triggers CALIB). Click again to return. |
 | **Hand grasp** | **Trigger** (per hand) | Controls the corresponding hand's grasp. |
 
