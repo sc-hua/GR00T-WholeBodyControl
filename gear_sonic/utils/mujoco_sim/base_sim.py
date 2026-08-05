@@ -21,10 +21,10 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
-from gear_sonic.utils.mujoco_sim.metric_utils import check_contact, check_height
+from gear_sonic.utils.mujoco_sim.metric_utils import check_contact
+from gear_sonic.utils.mujoco_sim.robot import Robot
 from gear_sonic.utils.mujoco_sim.sim_utils import get_subtree_body_names
 from gear_sonic.utils.mujoco_sim.unitree_sdk2py_bridge import ElasticBand, UnitreeSdk2Bridge
-from gear_sonic.utils.mujoco_sim.robot import Robot
 
 GEAR_SONIC_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -66,16 +66,27 @@ class DefaultEnv:
         self.init_scene()
         self.last_reward = 0
 
+        self._third_person_camera_id = mujoco.mj_name2id(
+            self.mj_model,
+            mujoco.mjtObj.mjOBJ_CAMERA,
+            "third_person_camera",
+        )
+        self._third_person_camera_offset = None
+        if self._third_person_camera_id != -1:
+            # The scene camera uses targetbody mode, which keeps it pointed at
+            # the pelvis but otherwise leaves its position fixed in the world.
+            # Preserve its initial world-space offset so the published third-
+            # person view follows the robot without inheriting pelvis rotation.
+            self._third_person_camera_offset = (
+                self.mj_model.cam_pos[self._third_person_camera_id].copy()
+                - self.mj_data.xpos[self.root_body_id].copy()
+            )
+
         if (
             not camera_configs
             and offscreen
             and enable_image_publish
-            and mujoco.mj_name2id(
-                self.mj_model,
-                mujoco.mjtObj.mjOBJ_CAMERA,
-                "third_person_camera",
-            )
-            != -1
+            and self._third_person_camera_id != -1
         ):
             self.camera_configs["third_person_view"] = {
                 "height": 480,
@@ -502,7 +513,20 @@ class DefaultEnv:
     def get_privileged_obs(self):
         return {}
 
+    def _update_third_person_camera(self):
+        """Move the named chase camera with the pelvis before rendering."""
+        if self._third_person_camera_offset is None:
+            return
+
+        self.mj_model.cam_pos[self._third_person_camera_id] = (
+            self.mj_data.xpos[self.root_body_id] + self._third_person_camera_offset
+        )
+        # Refresh only derived camera/light transforms; do not advance or
+        # recompute the simulation state.
+        mujoco.mj_camlight(self.mj_model, self.mj_data)
+
     def update_render_caches(self):
+        self._update_third_person_camera()
         render_caches = {}
         for camera_name, camera_config in self.camera_configs.items():
             renderer = self.renderers[camera_name]
@@ -1026,6 +1050,20 @@ class BaseSimulator:
         self.init_subscriber()
         self.init_publisher()
 
+        self.scene_reset_subscriber = None
+        if self.config.get("ENABLE_PICO_SCENE_RESET", False):
+            try:
+                from gear_sonic.utils.mujoco_sim.scene_reset_subscriber import (
+                    SceneResetSubscriber,
+                )
+
+                host = self.config.get("PICO_SCENE_RESET_HOST", "localhost")
+                port = self.config.get("PICO_SCENE_RESET_PORT", 5556)
+                self.scene_reset_subscriber = SceneResetSubscriber(host=host, port=port)
+                print(f"PICO scene reset enabled on tcp://{host}:{port}")
+            except Exception as exc:
+                print(f"Warning: Failed to initialize PICO scene reset: {exc}")
+
         self.sim_thread = None
 
     def start_as_thread(self):
@@ -1060,6 +1098,9 @@ class BaseSimulator:
             ):
                 step_start = time.monotonic()
 
+                if self.scene_reset_subscriber is not None and self.scene_reset_subscriber.poll():
+                    print("PICO requested MuJoCo scene reset/randomization")
+                    self.sim_env.reset(randomize_spawns=True)
                 self.sim_env.sim_step()
                 now = time.time()
                 if now - ts > 1 / 10.0 and self.redis_client is not None:
@@ -1098,6 +1139,9 @@ class BaseSimulator:
     def close(self):
         self._running = False
         try:
+            if self.scene_reset_subscriber is not None:
+                self.scene_reset_subscriber.close()
+                self.scene_reset_subscriber = None
             if self.sim_env.image_publish_process is not None:
                 self.sim_env.image_publish_process.stop()
             if self.sim_env.viewer is not None:
