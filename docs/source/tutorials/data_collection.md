@@ -501,6 +501,23 @@ python gear_sonic/scripts/process_dataset.py \
 
 To keep discarded episodes (e.g., for inspection), pass `--no-remove-discarded`.
 
+### Maintain an Append-Only Review Pool
+
+For repeated collection of the same task and schema, add these options to the
+normal collection command so later sessions resume one stable dataset:
+
+```bash
+python gear_sonic/scripts/launch_data_collection.py \
+    --dataset-name my_task_pool \
+    --no-append-dataset-timestamp \
+    --task-prompt "my task"
+```
+
+Keep this pool append-only: review decisions belong in `meta/review.jsonl`, and
+`discard` does not delete the underlying parquet or video. Generate separate,
+immutable training snapshots with `process_dataset.py`. Do not reuse a pool
+after changing its FPS, robot configuration, feature schema, or camera streams.
+
 ### Remove Stale SMPL Frames
 
 Teleop pauses or ZMQ frame drops create frames where `teleop.smpl_pose` is all
@@ -554,6 +571,11 @@ happens during operator pauses or ZMQ packet-drop periods where the SMPL
 stream stops updating.  Consecutive frozen (identical) frames that lead into
 a zero block are also removed, since they represent stale data right before
 the dropout.  To skip this cleaning and merge only, add `--no-remove-stale-smpl`.
+
+Every merge, trim, or reindex operation recomputes
+`meta/episodes_stats.jsonl`. LeRobot v2.1 loads these per-episode min/max/mean/std
+statistics to aggregate dataset normalization values, so the file must contain
+exactly one entry for every output episode.
 
 ---
 

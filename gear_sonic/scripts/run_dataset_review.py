@@ -41,21 +41,69 @@ G1_MODEL_DIR = (
 class DatasetReviewStore:
     def __init__(self, dataset_path: Path, review_file: Path | None = None):
         self.dataset_path = dataset_path.resolve()
-        self.info = self._read_json(self.dataset_path / "meta" / "info.json")
-        self.episodes = self._read_jsonl(self.dataset_path / "meta" / "episodes.jsonl")
-        self.tasks = self._read_jsonl(self.dataset_path / "meta" / "tasks.jsonl")
         self.review_file = (
             review_file.resolve()
             if review_file is not None
             else self.dataset_path / "meta" / "review.jsonl"
         )
-        self._lock = threading.Lock()
-        self.reviews = self._load_reviews()
+        self._lock = threading.RLock()
+        self.info: dict[str, Any] = {}
+        self.episodes: list[dict[str, Any]] = []
+        self.tasks: list[dict[str, Any]] = []
+        self.reviews: dict[int, dict[str, Any]] = {}
+        self._episodes_by_index: dict[int, dict[str, Any]] = {}
+        self.collection_discarded_indices: set[int] = set()
+        self.refresh()
 
-        if not self.episodes:
-            raise ValueError(f"Dataset has no episodes: {self.dataset_path}")
-        if "data_path" not in self.info or "video_path" not in self.info:
-            raise ValueError("Dataset info.json is missing data_path or video_path")
+    def refresh(self) -> dict[str, Any]:
+        """Reload completed episodes and reviews from an append-only dataset.
+
+        The exporter updates metadata as each episode is finalized. A short retry
+        handles the narrow window in which one of those files is being replaced.
+        """
+        with self._lock:
+            last_error: Exception | None = None
+            for attempt in range(3):
+                try:
+                    info = self._read_json(self.dataset_path / "meta" / "info.json")
+                    episodes = self._read_jsonl(self.dataset_path / "meta" / "episodes.jsonl")
+                    tasks = self._read_jsonl(self.dataset_path / "meta" / "tasks.jsonl")
+                    source_episodes = self._read_jsonl(
+                        self.dataset_path / "meta" / "source_episodes.jsonl"
+                    )
+                    reviews = self._load_reviews()
+                    break
+                except (FileNotFoundError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.05)
+            else:  # pragma: no cover - the retry loop either succeeds or raises
+                raise RuntimeError("Failed to refresh dataset metadata") from last_error
+
+            if not episodes:
+                raise ValueError(f"Dataset has no episodes: {self.dataset_path}")
+            if "data_path" not in info or "video_path" not in info:
+                raise ValueError("Dataset info.json is missing data_path or video_path")
+
+            episodes_by_index = {int(item["episode_index"]): item for item in episodes}
+            if len(episodes_by_index) != len(episodes):
+                raise ValueError("Dataset contains duplicate episode indices")
+
+            self.info = info
+            self.episodes = episodes
+            self.tasks = tasks
+            self.reviews = reviews
+            self._episodes_by_index = episodes_by_index
+            self.collection_discarded_indices = {
+                int(index) for index in info.get("discarded_episode_indices", [])
+            } | {
+                int(item["pool_episode_index"])
+                for item in source_episodes
+                if item.get("collection_discarded")
+            }
+            self.motion.cache_clear()
+            return self.summary()
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
@@ -81,9 +129,11 @@ class DatasetReviewStore:
         return int(self.info.get("fps", 50))
 
     def episode(self, episode_index: int) -> dict[str, Any]:
-        if episode_index < 0 or episode_index >= len(self.episodes):
-            raise IndexError(f"Unknown episode: {episode_index}")
-        return self.episodes[episode_index]
+        with self._lock:
+            try:
+                return self._episodes_by_index[episode_index]
+            except KeyError as exc:
+                raise IndexError(f"Unknown episode: {episode_index}") from exc
 
     def parquet_path(self, episode_index: int) -> Path:
         chunks_size = int(self.info.get("chunks_size", 1000))
@@ -120,36 +170,45 @@ class DatasetReviewStore:
         return path
 
     def summary(self) -> dict[str, Any]:
-        items = []
-        counts = {status: 0 for status in REVIEW_STATUSES}
-        for episode in self.episodes:
-            index = int(episode["episode_index"])
-            review = self.reviews.get(index, {"status": "unreviewed"})
-            status = review.get("status", "unreviewed")
-            counts[status] = counts.get(status, 0) + 1
-            items.append(
-                {
-                    "episode_index": index,
-                    "length": int(episode["length"]),
-                    "duration": round(int(episode["length"]) / self.fps, 3),
-                    "tasks": episode.get("tasks", []),
-                    "status": status,
-                    "trim_start": review.get("trim_start"),
-                    "trim_end": review.get("trim_end"),
-                    "notes": review.get("notes", ""),
-                    "updated_at": review.get("updated_at"),
-                }
-            )
-        return {
-            "dataset_name": self.dataset_path.name,
-            "dataset_path": str(self.dataset_path),
-            "review_file": str(self.review_file),
-            "fps": self.fps,
-            "total_episodes": len(items),
-            "total_frames": int(self.info.get("total_frames", 0)),
-            "counts": counts,
-            "episodes": items,
-        }
+        with self._lock:
+            items = []
+            counts = {status: 0 for status in REVIEW_STATUSES}
+            for episode in self.episodes:
+                index = int(episode["episode_index"])
+                collection_discarded = index in self.collection_discarded_indices
+                review = self.reviews.get(index)
+                if review is None:
+                    review = (
+                        {"status": "discard", "notes": "采集时标记丢弃"}
+                        if collection_discarded
+                        else {"status": "unreviewed"}
+                    )
+                status = review.get("status", "unreviewed")
+                counts[status] = counts.get(status, 0) + 1
+                items.append(
+                    {
+                        "episode_index": index,
+                        "length": int(episode["length"]),
+                        "duration": round(int(episode["length"]) / self.fps, 3),
+                        "tasks": episode.get("tasks", []),
+                        "status": status,
+                        "trim_start": review.get("trim_start"),
+                        "trim_end": review.get("trim_end"),
+                        "notes": review.get("notes", ""),
+                        "updated_at": review.get("updated_at"),
+                        "collection_discarded": collection_discarded,
+                    }
+                )
+            return {
+                "dataset_name": self.dataset_path.name,
+                "dataset_path": str(self.dataset_path),
+                "review_file": str(self.review_file),
+                "fps": self.fps,
+                "total_episodes": len(items),
+                "total_frames": int(self.info.get("total_frames", 0)),
+                "counts": counts,
+                "episodes": items,
+            }
 
     @lru_cache(maxsize=4)
     def motion(self, episode_index: int) -> dict[str, Any]:
@@ -308,6 +367,9 @@ class ReviewRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         try:
             path = unquote(urlparse(self.path).path)
+            if path == "/api/dataset/refresh":
+                self._json(self.store.refresh())
+                return
             parts = path.strip("/").split("/")
             if len(parts) != 4 or parts[:2] != ["api", "episodes"] or parts[3] != "review":
                 self._error(HTTPStatus.NOT_FOUND, "Route not found")

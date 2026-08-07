@@ -13,6 +13,14 @@ test("keeps review interactions and local API wiring in the client", async () =>
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const robotViewer = await readFile(new URL("../app/components/RobotViewer.tsx", import.meta.url), "utf8");
   assert.match(page, /api\/episodes\/\$\{selectedIndex\}\/review/);
+  assert.match(page, /api\/dataset\/refresh/);
+  assert.match(page, /刷新数据/);
+  assert.match(page, /formatUpdatedAt/);
+  assert.match(page, /审核更新时间/);
+  assert.match(page, /toggleStatusFilter/);
+  assert.match(page, /按审核状态多选筛选/);
+  assert.match(page, /collection_discarded/);
+  assert.match(page, /采集丢弃/);
   assert.match(page, /RobotViewer/);
   assert.match(page, /VideoFilmstrip/);
   assert.match(page, /MultiJointTimeline/);

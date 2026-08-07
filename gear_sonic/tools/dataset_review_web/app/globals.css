@@ -51,6 +51,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   border-bottom: 1px solid var(--line);
   background: var(--panel-2);
 }
+.brand-block { min-width: 0; display: flex; align-items: center; gap: 12px; }
+.brand-block > div { min-width: 0; }
 .brand-block h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -.015em; }
 .brand-block p {
   max-width: 42vw;
@@ -61,6 +63,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.brand-block button {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #18211f;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+.brand-block button:hover { border-color: var(--mint-deep); color: var(--ink); }
+.brand-block button:disabled { cursor: wait; opacity: .65; }
 .review-progress { min-width: 0; }
 .progress-copy { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px; }
 .progress-copy strong { color: var(--ink); font: 600 13px var(--font-geist-mono); }
@@ -100,11 +115,34 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   color: var(--ink);
   font-size: 13px;
 }
+.status-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 9px 0 0;
+  padding: 0;
+  border: 0;
+}
+.status-filter button {
+  min-height: 27px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #151c1b;
+  color: var(--subtle);
+  cursor: pointer;
+  font-size: 11px;
+}
+.status-filter button:hover { border-color: var(--line-strong); color: var(--ink); }
+.status-filter button.selected { border-color: var(--line-strong); background: #25302d; color: var(--ink); }
+.status-filter button.selected.keep { border-color: var(--mint-deep); color: var(--mint); }
+.status-filter button.selected.trim { border-color: #8f714a; color: var(--amber); }
+.status-filter button.selected.discard { border-color: #80504b; color: var(--red); }
 .episode-list { overflow-y: auto; padding: 6px; scrollbar-color: #3a4743 transparent; }
 .episode-card {
   position: relative;
   width: 100%;
-  min-height: 62px;
+  min-height: 76px;
   display: grid;
   grid-template-columns: 48px 1fr auto;
   align-items: center;
@@ -123,6 +161,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .episode-meta { display: flex; flex-direction: column; gap: 2px; }
 .episode-meta strong { font: 500 13px var(--font-geist-mono); }
 .episode-meta small { color: var(--subtle); font-size: 12px; }
+.episode-updated {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  color: var(--muted);
+  font: 10px var(--font-geist-mono);
+  white-space: nowrap;
+}
 .status-pill {
   padding: 3px 7px;
   border-radius: 5px;
@@ -135,7 +181,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .status-pill.keep { background: rgba(120,216,200,.13); color: var(--mint); }
 .status-pill.discard { background: rgba(224,131,121,.13); color: var(--red); }
 .status-pill.trim { background: rgba(232,182,116,.13); color: var(--amber); }
-.mini-range { position: absolute; right: 8px; bottom: 3px; left: 8px; height: 2px; background: #2b3532; }
+.mini-range { position: absolute; right: 8px; bottom: 2px; left: 8px; height: 2px; background: #2b3532; }
 .mini-range i { position: absolute; height: 100%; background: var(--amber); }
 
 .workspace {
@@ -413,6 +459,7 @@ details[open] .expand-label::after { font-size: 13px; content: "收起"; }
   .rail-heading { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .rail-heading > div { grid-column: 1/-1; margin: 0; }
   .rail-heading input, .rail-heading select { margin: 0; }
+  .status-filter { grid-column: 1 / -1; margin-top: 2px; }
   .episode-list { display: flex; overflow-x: auto; }
   .episode-card { min-width: 220px; }
   .workspace { display: flex; flex-direction: column; overflow: visible; }

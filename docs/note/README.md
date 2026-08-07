@@ -306,7 +306,8 @@ python gear_sonic/scripts/launch_data_collection.py \
   --sim \
   --sim-robot-scene gear_sonic/utils/mujoco_sim/scenes/scene_43dof_bottle_to_bin.xml \
   --task-prompt "pick up the bottle from the table and put it into the trash bin" \
-  --dataset-name pico_bottle_to_bin \
+  --dataset-name pico_bottle_to_bin_pool \
+  --no-append-dataset-timestamp \
   --pico-vis-vr3pt \
   --pico-vis-smpl \
   --xr-camera-viewer \
@@ -382,6 +383,11 @@ pico_bottle_to_bin_YYYYMMDD_HHMMSS
 如果确实需要继续写入一个已有的固定数据集，可以增加 `--no-append-dataset-timestamp`；此时显式传入
 同一个 `--dataset-name` 才会继续向原目录添加 episode。切换任务定义、相机配置或随机分布时，不应
 关闭时间后缀，以免把语义不同的数据混在一起。
+
+当前瓶子投桶任务使用 `outputs/pico_bottle_to_bin_pool` 作为长期 append-only 数据池。后续采集必须
+同时传入 `--dataset-name pico_bottle_to_bin_pool --no-append-dataset-timestamp`，并保持 FPS、机器人
+配置、特征 schema、相机通道和分辨率一致。pool 中不直接删除或重编号 episode；好坏数据都保留，
+审核结论单独记录在 `meta/review.jsonl`。
 
 ## 6. 常见问题速查
 
@@ -501,7 +507,7 @@ pick up every bottle from the table and put it into the trash bin
 ```bash
 source .venv_data_collection/bin/activate
 python gear_sonic/scripts/run_dataset_review.py \
-  --dataset-path outputs/pico_bottle_to_bin_merged_20260802
+  --dataset-path outputs/pico_bottle_to_bin_pool
 ```
 
 启动器会打开 `http://127.0.0.1:3000`。网页同步显示第一人称视频、仓库中真实
@@ -515,23 +521,30 @@ python gear_sonic/scripts/run_dataset_review.py \
 - `D`：丢弃整个 episode；
 - `I` / `O`：设置同步裁切的起点和终点；
 - `Space`：播放/暂停；方向键跳转时间；
+- 采集器保存新 episode 后点击顶部“刷新数据”，无需重启审核器；
 - 填写人工审核备注，并按状态筛选 episode。
 
-审核结果会立即原子化保存到数据集的 `meta/review.jsonl`，不会改动原 parquet 或 MP4。全部审核后，
-用同一个清单生成新的训练集：
+当前 pool 由 10 个历史原始批次迁移而来，共保留 116 个完整 episode、217881 帧和 116 个视频；根据
+`pico_bottle_to_bin_all_20260806_161900` 的低维帧序列唯一匹配，恢复出 20 个 `keep`、23 个 `trim`
+和 73 个 `discard`。其中 `discard` 只是审核标签，原始 parquet 和 MP4 仍保留。来源与匹配证据分别
+记录在 `meta/source_episodes.jsonl` 和 `meta/review_inference.json`。
+
+审核结果会立即原子化保存到 pool 的 `meta/review.jsonl`，不会改动原 parquet 或 MP4。需要训练时，
+用同一个清单生成不可变的训练快照：
 
 ```bash
 source .venv_data_collection/bin/activate
 python gear_sonic/scripts/process_dataset.py \
-  --dataset-path outputs/pico_bottle_to_bin_merged_20260802 \
-  --output-path outputs/pico_bottle_to_bin_reviewed \
-  --review-file outputs/pico_bottle_to_bin_merged_20260802/meta/review.jsonl \
+  --dataset-path outputs/pico_bottle_to_bin_pool \
+  --review-file outputs/pico_bottle_to_bin_pool/meta/review.jsonl \
+  --output-path outputs/pico_bottle_to_bin_reviewed_snapshot \
   --no-remove-stale-smpl
 ```
 
 传入 review 文件时，未审核 episode 默认不进入输出；如确实需要保留可加 `--include-unreviewed`。
 `trim` 会用相同帧索引裁剪 parquet 和所有视频，并重建 timestamp、frame index、episode index 和
-全局 index。输出保留 `meta/source_review.jsonl` 作为审核记录。三维视图使用真实 G1 URDF 关节树和
+全局 index，同时为处理后的帧重新生成 LeRobot v2.1 必需的 `meta/episodes_stats.jsonl`。输出保留
+`meta/source_review.jsonl` 作为审核记录。三维视图使用真实 G1 URDF 关节树和
 原始 mesh，但当前 `observation.state` 只包含 43 个关节角，没有 floating-base 的世界位置和朝向，
 因此网页中 pelvis 固定在展示原点；它仍不是完整的 MuJoCo 物理状态回放。
 

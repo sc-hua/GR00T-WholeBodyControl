@@ -5,7 +5,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from gear_sonic.scripts.process_dataset import process_single_dataset
+from gear_sonic.scripts.process_dataset import process_single_dataset, write_output_dataset
 from gear_sonic.scripts.run_dataset_review import G1_MODEL_DIR, DatasetReviewStore
 
 
@@ -34,6 +34,7 @@ def _make_dataset(root: Path) -> Path:
                 "shape": [43],
                 "names": [f"joint_{i}" for i in range(43)],
             },
+            "task_index": {"dtype": "int64", "shape": [1]},
         },
     }
     (meta / "info.json").write_text(json.dumps(info), encoding="utf-8")
@@ -47,6 +48,7 @@ def _make_dataset(root: Path) -> Path:
             "action.motion_token": [np.full(64, i, dtype=np.float32) for i in range(3)],
             "teleop.stream_mode": np.array([1, 2, 2], dtype=np.int32),
             "timestamp": np.array([0.0, 0.02, 0.04], dtype=np.float32),
+            "task_index": np.zeros(3, dtype=np.int64),
         }
     ).to_parquet(data / "episode_000000.parquet")
     (video / "episode_000000.mp4").write_bytes(b"fake-video")
@@ -88,6 +90,49 @@ def test_review_store_rejects_invalid_trim(tmp_path):
         raise AssertionError("Expected invalid trim to fail")
 
 
+def test_review_store_surfaces_collection_discard_as_discarded(tmp_path):
+    dataset = _make_dataset(tmp_path / "dataset")
+    info_path = dataset / "meta/info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["discarded_episode_indices"] = [0]
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    summary = DatasetReviewStore(dataset).summary()
+
+    assert summary["counts"]["discard"] == 1
+    assert summary["counts"]["unreviewed"] == 0
+    assert summary["episodes"][0]["status"] == "discard"
+    assert summary["episodes"][0]["collection_discarded"] is True
+    assert summary["episodes"][0]["notes"] == "采集时标记丢弃"
+
+
+def test_review_store_refreshes_appended_episodes_and_keeps_reviews(tmp_path):
+    dataset = _make_dataset(tmp_path / "dataset")
+    store = DatasetReviewStore(dataset)
+    store.save_review(0, {"status": "keep", "notes": "checked"})
+
+    episodes_path = dataset / "meta" / "episodes.jsonl"
+    _write_jsonl(
+        episodes_path,
+        [
+            {"episode_index": 0, "length": 3, "tasks": ["demo"]},
+            {"episode_index": 4, "length": 10, "tasks": ["new"]},
+        ],
+    )
+    info_path = dataset / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["total_frames"] = 13
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    summary = store.refresh()
+
+    assert summary["total_episodes"] == 2
+    assert summary["total_frames"] == 13
+    assert summary["counts"] == {"unreviewed": 1, "keep": 1, "discard": 0, "trim": 0}
+    assert store.episode(4)["tasks"] == ["new"]
+    assert store.episode(0)["episode_index"] == 0
+
+
 def test_g1_urdf_and_mesh_assets_are_available(tmp_path):
     store = DatasetReviewStore(_make_dataset(tmp_path / "dataset"))
     urdf = store.robot_asset_path("g1_29dof_with_hand.urdf")
@@ -127,3 +172,53 @@ def test_process_dataset_applies_manual_review_frames(tmp_path):
     assert len(episodes) == 1
     assert episodes[0]["valid_indices"].tolist() == [1, 2]
     np.testing.assert_allclose(episodes[0]["df"]["timestamp"].to_numpy(), [0.0, 0.02])
+
+
+def test_write_output_dataset_recomputes_episode_stats(tmp_path):
+    dataset = _make_dataset(tmp_path / "dataset")
+    _, episodes, info = process_single_dataset(dataset, remove_stale_smpl=False)
+    output = tmp_path / "output"
+
+    write_output_dataset(output, episodes, info, [], info.get("script_config"))
+
+    stats_rows = [
+        json.loads(line)
+        for line in (output / "meta/episodes_stats.jsonl").read_text().splitlines()
+    ]
+    state_stats = stats_rows[0]["stats"]["observation.state"]
+    assert len(stats_rows) == 1
+    assert state_stats["count"] == [3]
+    assert state_stats["min"][0] == 0.0
+    assert state_stats["max"][0] == 2.0
+
+
+def test_write_output_dataset_remaps_source_task_indices(tmp_path):
+    first = _make_dataset(tmp_path / "first")
+    second = _make_dataset(tmp_path / "second")
+    _write_jsonl(
+        second / "meta/tasks.jsonl",
+        [{"task_index": 0, "task": "second task"}],
+    )
+    _write_jsonl(
+        second / "meta/episodes.jsonl",
+        [{"episode_index": 0, "length": 3, "tasks": ["second task"]}],
+    )
+    _, first_episodes, info = process_single_dataset(first, remove_stale_smpl=False)
+    _, second_episodes, _ = process_single_dataset(second, remove_stale_smpl=False)
+    output = tmp_path / "output"
+    tasks = [
+        {"task_index": 0, "task": "demo"},
+        {"task_index": 1, "task": "second task"},
+    ]
+
+    write_output_dataset(
+        output,
+        first_episodes + second_episodes,
+        info,
+        tasks,
+        info.get("script_config"),
+    )
+
+    second_frame = pd.read_parquet(output / "data/chunk-000/episode_000001.parquet")
+    assert second_frame["task_index"].unique().tolist() == [1]
+    assert [json.loads(line) for line in (output / "meta/tasks.jsonl").read_text().splitlines()] == tasks

@@ -6,8 +6,9 @@ Removes discarded episodes (flagged during collection) and stale SMPL frames
 occur during teleop pauses or ZMQ frame drops.  Can also merge multiple
 recording sessions into a single dataset.
 
-The script operates directly on the LeRobot v2.1 on-disk format
-(parquet + mp4) without any external training framework dependencies.
+The script operates directly on the LeRobot v2.1 on-disk format (parquet + mp4)
+and uses the LeRobot utilities installed in the data-collection environment to
+recompute per-episode statistics after filtering and reindexing.
 
 Usage:
 
@@ -57,6 +58,8 @@ import shutil
 from typing import Optional
 
 import av
+from lerobot.common.datasets.compute_stats import compute_episode_stats
+from lerobot.common.datasets.utils import serialize_dict
 import numpy as np
 import pandas as pd
 import tyro
@@ -185,6 +188,23 @@ def get_video_paths(dataset_path: Path, info: dict, episode_index: int) -> dict[
     return paths
 
 
+def compute_dataframe_episode_stats(df: pd.DataFrame, info: dict) -> dict:
+    """Compute LeRobot v2.1 statistics for one processed parquet dataframe."""
+    features = {
+        key: value
+        for key, value in info.get("features", {}).items()
+        if value.get("dtype") not in ("image", "video")
+    }
+    missing = sorted(set(features) - set(df.columns))
+    if missing:
+        raise ValueError(f"Cannot compute episode stats; parquet is missing features: {missing}")
+    episode_data = {
+        key: np.stack(df[key].to_numpy())
+        for key in features
+    }
+    return compute_episode_stats(episode_data, features)
+
+
 def filter_video_frames(video_path: Path, valid_indices: np.ndarray, fps: int):
     """Re-encode a video keeping only frames at valid_indices."""
     input_container = av.open(str(video_path))
@@ -282,6 +302,10 @@ def process_single_dataset(
     """
     info = load_info(dataset_path)
     episodes_meta = load_episodes_meta(dataset_path)
+    source_task_by_index = {
+        int(task["task_index"]): str(task["task"])
+        for task in load_tasks_meta(dataset_path)
+    }
     fps = info.get("fps", 50)
 
     discarded_indices = set(info.get("discarded_episode_indices", [])) if remove_discarded else set()
@@ -401,6 +425,7 @@ def process_single_dataset(
             "source_video_paths": video_paths,
             "valid_indices": valid_indices,
             "episode_meta": ep_meta,
+            "source_task_by_index": source_task_by_index,
             "new_episode_index": new_ep_idx,
             "fps": fps,
         })
@@ -430,6 +455,11 @@ def write_output_dataset(
     total_frames = 0
     total_videos = 0
     episodes_jsonl = []
+    episodes_stats_jsonl = []
+    canonical_task_index = {
+        str(task["task"]): int(task["task_index"])
+        for task in tasks_meta
+    }
 
     for i, ep in enumerate(all_episodes):
         df = ep["df"]
@@ -438,6 +468,17 @@ def write_output_dataset(
         df["episode_index"] = i
         df["index"] = range(total_frames, total_frames + ep_len)
         df["frame_index"] = range(ep_len)
+        if "task_index" in df.columns and canonical_task_index:
+            source_task_by_index = ep.get("source_task_by_index", {})
+            try:
+                df["task_index"] = [
+                    canonical_task_index[source_task_by_index[int(source_index)]]
+                    for source_index in df["task_index"]
+                ]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Episode {ep['episode_meta']['episode_index']} has an unknown task mapping: {exc}"
+                ) from exc
         if "timestamp" in df.columns:
             df["timestamp"] = [j / fps for j in range(ep_len)]
 
@@ -478,6 +519,12 @@ def write_output_dataset(
             "length": ep_len,
         }
         episodes_jsonl.append(ep_meta)
+        episodes_stats_jsonl.append(
+            {
+                "episode_index": i,
+                "stats": serialize_dict(compute_dataframe_episode_stats(df, info)),
+            }
+        )
 
         total_frames += ep_len
 
@@ -492,6 +539,10 @@ def write_output_dataset(
     with open(meta_dir / "episodes.jsonl", "w", encoding="utf-8") as f:
         for ep in episodes_jsonl:
             f.write(json.dumps(ep) + "\n")
+
+    with open(meta_dir / "episodes_stats.jsonl", "w", encoding="utf-8") as f:
+        for episode_stats in episodes_stats_jsonl:
+            f.write(json.dumps(episode_stats) + "\n")
 
     if tasks_meta:
         with open(meta_dir / "tasks.jsonl", "w", encoding="utf-8") as f:
@@ -619,13 +670,15 @@ def main(cfg: ProcessDatasetConfig):
 
     # Collect tasks from all datasets (deduplicated)
     all_tasks_meta: list[dict] = []
-    seen_task_ids: set = set()
+    seen_tasks: set[str] = set()
     for ds in dataset_paths:
         for task in load_tasks_meta(ds):
-            tid = task.get("task_index", id(task))
-            if tid not in seen_task_ids:
-                all_tasks_meta.append(task)
-                seen_task_ids.add(tid)
+            task_text = str(task["task"])
+            if task_text not in seen_tasks:
+                all_tasks_meta.append(
+                    {"task_index": len(all_tasks_meta), "task": task_text}
+                )
+                seen_tasks.add(task_text)
 
     # Process each dataset
     all_episodes = []
@@ -707,6 +760,17 @@ def main(cfg: ProcessDatasetConfig):
         with open(output_path / "meta" / "episodes.jsonl", "w", encoding="utf-8") as f:
             for em in episodes_meta:
                 f.write(json.dumps(em) + "\n")
+
+        with open(output_path / "meta" / "episodes_stats.jsonl", "w", encoding="utf-8") as f:
+            for ep in all_episodes:
+                episode_index = int(ep["episode_meta"]["episode_index"])
+                episode_stats = compute_dataframe_episode_stats(ep["df"], ds_info)
+                f.write(
+                    json.dumps(
+                        {"episode_index": episode_index, "stats": serialize_dict(episode_stats)}
+                    )
+                    + "\n"
+                )
 
         ds_info["total_frames"] = sum(len(ep["df"]) for ep in all_episodes)
         ds_info["total_episodes"] = len(all_episodes)

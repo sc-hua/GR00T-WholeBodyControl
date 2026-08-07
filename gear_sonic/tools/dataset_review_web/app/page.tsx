@@ -15,6 +15,7 @@ type Episode = {
   trim_end: number | null;
   notes: string;
   updated_at?: string;
+  collection_discarded: boolean;
 };
 
 type DatasetSummary = {
@@ -47,6 +48,8 @@ const statusCopy: Record<ReviewStatus, string> = {
   trim: "已裁切",
 };
 
+const reviewStatuses: ReviewStatus[] = ["unreviewed", "keep", "trim", "discard"];
+
 const modeCopy: Record<number, string> = {
   0: "OFF",
   1: "POSE",
@@ -73,6 +76,20 @@ function formatTime(seconds: number | null | undefined) {
   if (seconds == null || !Number.isFinite(seconds)) return "--:--.--";
   const min = Math.floor(seconds / 60);
   return `${String(min).padStart(2, "0")}:${(seconds % 60).toFixed(2).padStart(5, "0")}`;
+}
+
+function formatUpdatedAt(value: string | undefined) {
+  if (!value) return "未审核";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).replaceAll("/", "-");
 }
 
 type FilmstripFrame = { time: number; image: string };
@@ -371,10 +388,13 @@ export default function Home() {
   const [motion, setMotion] = useState<MotionData | null>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [visibleJoints, setVisibleJoints] = useState<Set<number>>(new Set());
-  const [filter, setFilter] = useState<ReviewStatus | "all">("all");
+  const [visibleStatuses, setVisibleStatuses] = useState<Set<ReviewStatus>>(
+    () => new Set(reviewStatuses),
+  );
   const [query, setQuery] = useState("");
   const [mediaCompact, setMediaCompact] = useState(false);
   const [busy, setBusy] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
 
   const selected = dataset?.episodes.find((episode) => episode.episode_index === selectedIndex) ?? null;
@@ -385,6 +405,25 @@ export default function Home() {
     const next: DatasetSummary = await response.json();
     setDataset(next);
     return next;
+  }, []);
+
+  const reloadDataset = useCallback(async () => {
+    setRefreshing(true);
+    setError("");
+    try {
+      const response = await fetch(`${API}/api/dataset/refresh`, { method: "POST" });
+      if (!response.ok) throw new Error((await response.json()).error ?? "刷新数据集失败");
+      const next: DatasetSummary = await response.json();
+      setDataset(next);
+      setSelectedIndex((current) => {
+        if (next.episodes.some((episode) => episode.episode_index === current)) return current;
+        return (next.episodes.find((episode) => episode.status === "unreviewed") ?? next.episodes[0]).episode_index;
+      });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setRefreshing(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -488,11 +527,20 @@ export default function Home() {
   const visibleEpisodes = useMemo(() => {
     if (!dataset) return [];
     return dataset.episodes.filter((episode) => {
-      const statusMatch = filter === "all" || episode.status === filter;
+      const statusMatch = visibleStatuses.has(episode.status);
       const queryMatch = !query || String(episode.episode_index).includes(query) || episode.notes.toLowerCase().includes(query.toLowerCase());
       return statusMatch && queryMatch;
     });
-  }, [dataset, filter, query]);
+  }, [dataset, query, visibleStatuses]);
+
+  const toggleStatusFilter = useCallback((status: ReviewStatus) => {
+    setVisibleStatuses((current) => {
+      const next = new Set(current);
+      if (next.has(status)) next.delete(status);
+      else next.add(status);
+      return next;
+    });
+  }, []);
 
   const toggleJoint = useCallback((jointIndex: number) => {
     setVisibleJoints((current) => {
@@ -519,6 +567,9 @@ export default function Home() {
             <h1>Episode Review Studio</h1>
             <p>{dataset.dataset_name}</p>
           </div>
+          <button type="button" onClick={reloadDataset} disabled={refreshing} title="读取新采集完成的 episodes">
+            {refreshing ? "刷新中…" : "刷新数据"}
+          </button>
         </div>
         <div className="review-progress">
           <div className="progress-copy"><span>审核进度</span><strong>{progress}%</strong></div>
@@ -536,13 +587,23 @@ export default function Home() {
         <div className="rail-heading">
           <div><span>数据队列</span><strong>{visibleEpisodes.length}</strong></div>
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索编号/备注" aria-label="搜索 episode" />
-          <select value={filter} onChange={(event) => setFilter(event.target.value as ReviewStatus | "all")} aria-label="按审核状态筛选">
-            <option value="all">全部状态</option>
-            <option value="unreviewed">待审核</option>
-            <option value="keep">保留</option>
-            <option value="trim">已裁切</option>
-            <option value="discard">丢弃</option>
-          </select>
+          <fieldset className="status-filter" aria-label="按审核状态多选筛选">
+            <button
+              type="button"
+              className={visibleStatuses.size === reviewStatuses.length ? "selected" : ""}
+              aria-pressed={visibleStatuses.size === reviewStatuses.length}
+              onClick={() => setVisibleStatuses(new Set(reviewStatuses))}
+            >全部</button>
+            {reviewStatuses.map((status) => (
+              <button
+                type="button"
+                key={status}
+                className={visibleStatuses.has(status) ? `selected ${status}` : ""}
+                aria-pressed={visibleStatuses.has(status)}
+                onClick={() => toggleStatusFilter(status)}
+              >{statusCopy[status]}</button>
+            ))}
+          </fieldset>
         </div>
         <div className="episode-list">
           {visibleEpisodes.map((episode) => (
@@ -556,7 +617,10 @@ export default function Home() {
                 <strong>{formatTime(episode.duration)}</strong>
                 <small>{episode.length.toLocaleString()} 帧</small>
               </div>
-              <span className={`status-pill ${episode.status}`}>{statusCopy[episode.status]}</span>
+              <span className={`status-pill ${episode.status}`}>
+                {episode.status === "discard" && episode.collection_discarded ? "采集丢弃" : statusCopy[episode.status]}
+              </span>
+              <small className="episode-updated" title="审核更新时间">{formatUpdatedAt(episode.updated_at)}</small>
               {episode.trim_start != null && episode.trim_end != null && (
                 <div className="mini-range"><i style={{ left: `${episode.trim_start / episode.duration * 100}%`, right: `${100 - episode.trim_end / episode.duration * 100}%` }} /></div>
               )}
